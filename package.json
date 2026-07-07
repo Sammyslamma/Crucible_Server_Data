@@ -1,0 +1,12 @@
+{
+  "name": "crucible-server-data",
+  "version": "1.0.0",
+  "description": "Scryfall + MTGJson merge pipeline for MTG collection app",
+  "main": "scripts/sync-scryfall.js",
+  "scripts": {
+    "sync": "node scripts/sync-scryfall.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.0"
+  }
+}
