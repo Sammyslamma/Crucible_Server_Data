@@ -6,8 +6,8 @@ import { pipeline } from 'stream/promises';
 import { createReadStream, createWriteStream } from 'fs';
 
 const SCRYFALL_URL = 'https://data.scryfall.io/default-cards/default-cards.json';
-const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllCards.json';
-const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/PricePoints.json';
+const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
+const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json';
 
 const OUTPUT_DIR = './output';
 
