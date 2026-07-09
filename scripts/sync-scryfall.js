@@ -2,14 +2,30 @@ import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
-import { pipeline } from 'stream/promises';
 import { createReadStream, createWriteStream } from 'fs';
 
-const SCRYFALL_URL = 'https://data.scryfall.io/default-cards/default-cards.json';
 const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
 const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json';
 
 const OUTPUT_DIR = './output';
+
+/**
+ * Fetch the actual Scryfall download URL from metadata
+ */
+async function getScryfallDownloadUrl() {
+  console.log('📋 Fetching Scryfall metadata...');
+  const response = await fetch('https://api.scryfall.com/bulk-data');
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Scryfall metadata: ${response.status}`);
+  }
+  const data = await response.json();
+  const defaultCards = data.data.find(item => item.type === 'default_cards');
+  if (!defaultCards) {
+    throw new Error('default_cards bulk data not found in Scryfall metadata');
+  }
+  console.log(`✅ Got Scryfall download URL`);
+  return defaultCards.download_uri;
+}
 
 /**
  * Download a file from URL with progress logging
@@ -58,7 +74,7 @@ function calculateHash(filePath) {
 }
 
 /**
- * Load and parse a large JSON file line by line (for memory efficiency)
+ * Load and parse a large JSON file
  */
 async function loadJsonFile(filePath) {
   console.log(`📖 Loading ${filePath}...`);
@@ -198,14 +214,25 @@ async function sync() {
 
     console.log('🚀 Starting Scryfall + MTGJson sync...\n');
 
+    // Get Scryfall download URL
+    const SCRYFALL_URL = await getScryfallDownloadUrl();
+
     // Download files
     const scryfallPath = path.join(OUTPUT_DIR, 'scryfall_temp.json');
     const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
 
+    console.log('\n⬇️ Step 1: Downloading Scryfall...');
     await downloadFile(SCRYFALL_URL, scryfallPath);
+    console.log('✅ Scryfall download complete\n');
+
+    console.log('⬇️ Step 2: Downloading MTGJson...');
     await downloadFile(MTGJSON_URL, mtgjsonPath);
+    console.log('✅ MTGJson download complete\n');
+
+    console.log('⬇️ Step 3: Downloading Prices...');
     await downloadFile(MTGJSON_PRICES_URL, pricesPath);
+    console.log('✅ Prices download complete\n');
 
     // Load data
     const scryfallCards = await loadJsonFile(scryfallPath);

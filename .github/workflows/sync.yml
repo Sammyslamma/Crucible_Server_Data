@@ -2,7 +2,6 @@ name: Sync Scryfall + MTGJson
 
 on:
   schedule:
-    # Run daily at 2 AM UTC
     - cron: '0 2 * * *'
   workflow_dispatch:
 
@@ -13,30 +12,23 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
 
-      - name: Install dependencies
-        run: npm install
+      - run: npm install
 
-      - name: Run sync script
-        run: npm run sync
+      - run: npm run sync
 
-      - name: Create release and upload artifacts
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.date.outputs.date }}
+          tag_name: v${{ github.run_id }}
           files: |
             output/light_index.json
             output/prices.json
             output/manifest.json
-          body: |
-            Automated Scryfall + MTGJson sync
-            Generated at: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
