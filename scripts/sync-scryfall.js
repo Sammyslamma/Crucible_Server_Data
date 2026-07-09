@@ -30,33 +30,46 @@ async function getScryfallDownloadUrl() {
 /**
  * Download a file from URL with progress logging
  */
-async function downloadFile(url, outputPath) {
-  console.log(`⬇️  Downloading from ${url}...`);
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    throw new Error(`Failed to download ${url}: ${response.status}`);
-  }
-
-  const fileSize = response.headers.get('content-length');
-  let downloadedSize = 0;
-
-  const file = createWriteStream(outputPath);
-
-  for await (const chunk of response.body) {
-    downloadedSize += chunk.length;
-    const percent = fileSize ? ((downloadedSize / fileSize) * 100).toFixed(2) : '?';
-    process.stdout.write(`\r  Progress: ${percent}%`);
-    file.write(chunk);
-  }
-
-  return new Promise((resolve, reject) => {
-    file.on('finish', () => {
-      console.log(`\n✅ Downloaded to ${outputPath}`);
-      resolve();
+async function downloadFile(url, outputPath, name) {
+  console.log(`⬇️  Downloading ${name}...`);
+  
+  try {
+    const response = await fetch(url, {
+      timeout: 600000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
     });
-    file.on('error', reject);
-  });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const file = createWriteStream(outputPath);
+    let downloadedSize = 0;
+    let lastLog = 0;
+
+    for await (const chunk of response.body) {
+      downloadedSize += chunk.length;
+      file.write(chunk);
+      
+      // Log every 50MB
+      if (downloadedSize - lastLog > 50 * 1024 * 1024) {
+        console.log(`  Downloaded ${(downloadedSize / 1024 / 1024).toFixed(0)}MB...`);
+        lastLog = downloadedSize;
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      file.on('finish', () => {
+        console.log(`✅ ${name} complete (${(downloadedSize / 1024 / 1024).toFixed(0)}MB)`);
+        resolve();
+      });
+      file.on('error', reject);
+    });
+  } catch (error) {
+    throw new Error(`Failed to download ${name}: ${error.message}`);
+  }
 }
 
 /**
@@ -223,16 +236,13 @@ async function sync() {
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
 
     console.log('\n⬇️ Step 1: Downloading Scryfall...');
-    await downloadFile(SCRYFALL_URL, scryfallPath);
-    console.log('✅ Scryfall download complete\n');
+    await downloadFile(SCRYFALL_URL, scryfallPath, 'Scryfall');
 
-    console.log('⬇️ Step 2: Downloading MTGJson...');
-    await downloadFile(MTGJSON_URL, mtgjsonPath);
-    console.log('✅ MTGJson download complete\n');
+    console.log('\n⬇️ Step 2: Downloading MTGJson...');
+    await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
 
-    console.log('⬇️ Step 3: Downloading Prices...');
-    await downloadFile(MTGJSON_PRICES_URL, pricesPath);
-    console.log('✅ Prices download complete\n');
+    console.log('\n⬇️ Step 3: Downloading Prices...');
+    await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
 
     // Load data
     const scryfallCards = await loadJsonFile(scryfallPath);
