@@ -22,6 +22,9 @@ jobs:
 
       - run: npm run sync
 
+      - name: List output directory
+        run: ls -la output/
+        
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
