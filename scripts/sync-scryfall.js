@@ -53,19 +53,24 @@ async function downloadFile(url, outputPath, name) {
       downloadedSize += chunk.length;
       file.write(chunk);
       
-      // Log every 50MB
       if (downloadedSize - lastLog > 50 * 1024 * 1024) {
         console.log(`  Downloaded ${(downloadedSize / 1024 / 1024).toFixed(0)}MB...`);
         lastLog = downloadedSize;
       }
     }
 
+    // Close the file and wait for it to flush
+    file.end();
+    
     return new Promise((resolve, reject) => {
       file.on('finish', () => {
         console.log(`✅ ${name} complete (${(downloadedSize / 1024 / 1024).toFixed(0)}MB)`);
         resolve();
       });
-      file.on('error', reject);
+      file.on('error', (err) => {
+        console.error(`Error writing ${name}:`, err);
+        reject(err);
+      });
     });
   } catch (error) {
     throw new Error(`Failed to download ${name}: ${error.message}`);
