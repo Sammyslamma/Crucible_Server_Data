@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { createReadStream, createWriteStream } from 'fs';
+import StreamValues from 'stream-json/streamers/StreamValues.js';
 
 const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
 const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json';
@@ -59,7 +60,6 @@ async function downloadFile(url, outputPath, name) {
       }
     }
 
-    // Close the file and wait for it to flush
     file.end();
     
     return new Promise((resolve, reject) => {
@@ -92,19 +92,93 @@ function calculateHash(filePath) {
 }
 
 /**
- * Load and parse a large JSON file
+ * Stream parse Scryfall NDJSON file (one object per line)
  */
-async function loadJsonFile(filePath) {
-  console.log(`📖 Loading ${filePath}...`);
+async function loadScryfallNdjson(filePath) {
+  console.log(`📖 Loading Scryfall NDJSON...`);
+  const cards = {};
+  
+  return new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath, { encoding: 'utf8' });
+    let lineNumber = 0;
+
+    stream.on('data', (chunk) => {
+      const lines = chunk.toString().split('\n');
+      
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        
+        try {
+          const card = JSON.parse(line);
+          if (card.id) {
+            cards[card.id] = card;
+          }
+          lineNumber++;
+          
+          if (lineNumber % 50000 === 0) {
+            console.log(`  Processed ${lineNumber} cards...`);
+          }
+        } catch (err) {
+          console.error(`Error parsing line ${lineNumber}:`, err.message);
+        }
+      }
+    });
+
+    stream.on('end', () => {
+      console.log(`✅ Loaded ${Object.keys(cards).length} Scryfall cards`);
+      resolve(cards);
+    });
+
+    stream.on('error', reject);
+  });
+}
+
+/**
+ * Stream parse MTGJson (large single JSON object)
+ */
+async function loadMtgJsonStream(filePath) {
+  console.log(`📖 Loading MTGJson stream...`);
+  const cards = {};
+  
+  return new Promise((resolve, reject) => {
+    const pipeline = createReadStream(filePath)
+      .pipe(StreamValues.withParser());
+
+    let cardCount = 0;
+
+    pipeline.on('data', ({ key, value }) => {
+      cards[key] = value;
+      cardCount++;
+      
+      if (cardCount % 10000 === 0) {
+        console.log(`  Processed ${cardCount} card names...`);
+      }
+    });
+
+    pipeline.on('end', () => {
+      console.log(`✅ Loaded ${Object.keys(cards).length} MTGJson cards`);
+      resolve(cards);
+    });
+
+    pipeline.on('error', reject);
+  });
+}
+
+/**
+ * Load prices JSON (small enough to load entirely)
+ */
+async function loadPricesJson(filePath) {
+  console.log(`📖 Loading prices...`);
+  
   return new Promise((resolve, reject) => {
     const chunks = [];
     const stream = createReadStream(filePath, { encoding: 'utf8' });
-    
+
     stream.on('data', chunk => chunks.push(chunk));
     stream.on('end', () => {
       try {
         const data = JSON.parse(chunks.join(''));
-        console.log(`✅ Loaded ${filePath}`);
+        console.log(`✅ Loaded prices for ${Object.keys(data).length} cards`);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -160,7 +234,7 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
  */
 function extractTokenParts(mtgjsonCards, uuidToScryfallId) {
   console.log('🎴 Extracting tokenParts from MTGJson...');
-  const cardTokenParts = {}; // scryfallId → [scryfallId, ...]
+  const cardTokenParts = {};
 
   for (const versions of Object.values(mtgjsonCards)) {
     if (!Array.isArray(versions)) continue;
@@ -171,10 +245,9 @@ function extractTokenParts(mtgjsonCards, uuidToScryfallId) {
       const scryfallId = uuidToScryfallId[card.uuid];
       if (!scryfallId) continue;
 
-      // Convert token UUIDs to Scryfall IDs
       const tokenScryfallIds = card.tokenParts
         .map((tokenUuid) => uuidToScryfallId[tokenUuid])
-        .filter((id) => id); // Remove unmapped UUIDs
+        .filter((id) => id);
 
       if (tokenScryfallIds.length > 0) {
         cardTokenParts[scryfallId] = tokenScryfallIds;
@@ -187,33 +260,29 @@ function extractTokenParts(mtgjsonCards, uuidToScryfallId) {
 }
 
 /**
- * Merge Scryfall light index with MTGJson tokenParts
+ * Merge Scryfall cards with MTGJson tokenParts
  */
 function mergeLightIndex(scryfallCards, cardTokenParts) {
   console.log('🔀 Merging light index with tokenParts...');
   const merged = {};
-  let mergedCount = 0;
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     merged[scryfallId] = { ...card };
 
-    // Add tokenParts if available
     if (cardTokenParts[scryfallId]) {
       merged[scryfallId].tokenParts = cardTokenParts[scryfallId];
     }
-
-    mergedCount++;
   }
 
-  console.log(`✅ Merged ${mergedCount} cards`);
+  console.log(`✅ Merged ${Object.keys(merged).length} cards`);
   return merged;
 }
 
 /**
- * Extract prices from MTGJson and match against Scryfall
+ * Extract prices and match against Scryfall
  */
 function extractPrices(pricePoints, scryfallCards) {
-  console.log('💰 Extracting prices from MTGJson...');
+  console.log('💰 Extracting prices...');
   const prices = {};
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
@@ -238,51 +307,37 @@ function extractPrices(pricePoints, scryfallCards) {
  */
 async function sync() {
   try {
-    // Create output directory
     if (!fs.existsSync(OUTPUT_DIR)) {
       fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     }
 
     console.log('🚀 Starting Scryfall + MTGJson sync...\n');
 
-    // Get Scryfall download URL
     const SCRYFALL_URL = await getScryfallDownloadUrl();
 
-    // Download files
     const scryfallPath = path.join(OUTPUT_DIR, 'scryfall_temp.json');
     const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
 
     console.log('\n⬇️ Step 1: Downloading Scryfall...');
     await downloadFile(SCRYFALL_URL, scryfallPath, 'Scryfall');
-    console.log('✅ Scryfall complete, proceeding to step 2...\n');
 
-    console.log('⬇️ Step 2: Downloading MTGJson...');
+    console.log('\n⬇️ Step 2: Downloading MTGJson...');
     await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
-    console.log('✅ MTGJson complete, proceeding to step 3...\n');
 
-    console.log('⬇️ Step 3: Downloading Prices...');
+    console.log('\n⬇️ Step 3: Downloading Prices...');
     await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
-    console.log('✅ Prices complete, loading data...\n');
 
-    // Load data
-    const scryfallCards = await loadJsonFile(scryfallPath);
-    const mtgjsonCards = await loadJsonFile(mtgjsonPath);
-    const pricePoints = await loadJsonFile(pricesPath);
+    console.log('\n⬇️ Step 4: Loading and processing files...');
+    const scryfallCards = await loadScryfallNdjson(scryfallPath);
+    const mtgjsonCards = await loadMtgJsonStream(mtgjsonPath);
+    const pricePoints = await loadPricesJson(pricesPath);
 
-    // Create UUID → Scryfall ID mapping
     const uuidToScryfallId = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
-
-    // Extract and convert tokenParts
     const cardTokenParts = extractTokenParts(mtgjsonCards, uuidToScryfallId);
-
-    // Merge light index
     const mergedIndex = mergeLightIndex(scryfallCards, cardTokenParts);
-
-    // Extract prices
     const extractedPrices = extractPrices(pricePoints, scryfallCards);
 
-    // Write output files
     console.log('\n📝 Writing output files...');
 
     const lightIndexPath = path.join(OUTPUT_DIR, 'light_index.json');
@@ -292,16 +347,14 @@ async function sync() {
     fs.writeFileSync(lightIndexPath, JSON.stringify(mergedIndex, null, 2));
     fs.writeFileSync(pricesOutputPath, JSON.stringify(extractedPrices, null, 2));
 
-    // Calculate hashes
     const lightIndexHash = await calculateHash(lightIndexPath);
     const pricesHash = await calculateHash(pricesOutputPath);
 
     const lightIndexSize = fs.statSync(lightIndexPath).size;
     const pricesSize = fs.statSync(pricesOutputPath).size;
 
-    // Create manifest
     const timestamp = new Date().toISOString();
-    const version = timestamp.split('T')[0]; // YYYY-MM-DD
+    const version = timestamp.split('T')[0];
 
     const manifest = {
       version,
@@ -326,7 +379,6 @@ async function sync() {
     console.log(`✅ prices.json written (${(pricesSize / 1024 / 1024).toFixed(2)} MB)`);
     console.log(`✅ manifest.json written`);
 
-    // Cleanup temp files
     fs.unlinkSync(scryfallPath);
     fs.unlinkSync(mtgjsonPath);
     fs.unlinkSync(pricesPath);
