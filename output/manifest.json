@@ -1,0 +1,16 @@
+{
+  "version": "2026-07-09",
+  "generatedAt": "2026-07-09T07:08:20.739Z",
+  "files": {
+    "light_index.json": {
+      "sha256": "4d85fb3200e183a8560fbfc63f53ed675c4d43cdfa04acf806df48c0360caade",
+      "size": 25767,
+      "url": "https://github.com/Sammyslamma/Crucible_Server_Data/releases/download/v2026-07-09/light_index.json"
+    },
+    "prices.json": {
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "size": 2,
+      "url": "https://github.com/Sammyslamma/Crucible_Server_Data/releases/download/v2026-07-09/prices.json"
+    }
+  }
+}

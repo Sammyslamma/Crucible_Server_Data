@@ -8,6 +8,7 @@
     "sync": "node scripts/sync-scryfall.js"
   },
   "dependencies": {
-    "node-fetch": "^3.3.0"
+    "node-fetch": "^3.3.0",
+    "stream-json": "^1.8.0"
   }
 }
