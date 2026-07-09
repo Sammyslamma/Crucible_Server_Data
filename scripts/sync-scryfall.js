@@ -96,9 +96,22 @@ function calculateHash(filePath) {
  */
 async function loadJsonFile(filePath) {
   console.log(`📖 Loading ${filePath}...`);
-  const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  console.log(`✅ Loaded ${filePath}`);
-  return data;
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const stream = createReadStream(filePath, { encoding: 'utf8' });
+    
+    stream.on('data', chunk => chunks.push(chunk));
+    stream.on('end', () => {
+      try {
+        const data = JSON.parse(chunks.join(''));
+        console.log(`✅ Loaded ${filePath}`);
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    stream.on('error', reject);
+  });
 }
 
 /**
