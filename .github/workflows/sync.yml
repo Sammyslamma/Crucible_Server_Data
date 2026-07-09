@@ -25,10 +25,10 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ github.run_id }}
+          tag_name: v${{ github.run_number }}
           files: |
-            output/light_index.json
-            output/prices.json
-            output/manifest.json
+            ./output/light_index.json
+            ./output/prices.json
+            ./output/manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
