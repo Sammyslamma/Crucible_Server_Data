@@ -22,10 +22,6 @@ jobs:
 
       - run: NODE_OPTIONS="--max-old-space-size=4096" npm run sync
 
-      - name: List output directory
-        if: always()
-        run: ls -lh output/
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
