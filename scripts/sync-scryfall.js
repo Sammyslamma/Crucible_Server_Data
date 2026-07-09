@@ -237,12 +237,15 @@ async function sync() {
 
     console.log('\n⬇️ Step 1: Downloading Scryfall...');
     await downloadFile(SCRYFALL_URL, scryfallPath, 'Scryfall');
+    console.log('✅ Scryfall complete, proceeding to step 2...\n');
 
-    console.log('\n⬇️ Step 2: Downloading MTGJson...');
+    console.log('⬇️ Step 2: Downloading MTGJson...');
     await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
+    console.log('✅ MTGJson complete, proceeding to step 3...\n');
 
-    console.log('\n⬇️ Step 3: Downloading Prices...');
+    console.log('⬇️ Step 3: Downloading Prices...');
     await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
+    console.log('✅ Prices complete, loading data...\n');
 
     // Load data
     const scryfallCards = await loadJsonFile(scryfallPath);
@@ -317,7 +320,9 @@ async function sync() {
     console.log(`   - Cards with prices: ${Object.keys(extractedPrices).length}`);
     console.log(`   - Cards with tokenParts: ${Object.keys(cardTokenParts).length}`);
   } catch (error) {
-    console.error('❌ Error during sync:', error);
+    console.error('❌ Error during sync:');
+    console.error('Message:', error.message);
+    console.error('Stack:', error.stack);
     process.exit(1);
   }
 }
