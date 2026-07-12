@@ -3,10 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { createReadStream, createWriteStream } from 'fs';
-import pkg from 'stream-json';
-const { parser } = pkg;
-import StreamObject from 'stream-json/streamers/StreamObject.js';
-const { streamObject } = StreamObject;
+import JSONStream from 'JSONStream';
 
 const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
 const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json';
@@ -81,50 +78,140 @@ async function downloadFile(url, outputPath, name) {
 }
 
 /**
- * Convert MTGJson to NDJSON using streaming JSON parser
+ * Convert MTGJson to NDJSON using JSONStream
+ * Structure: { meta: {...}, data: { "10E": { "cards": [...], "tokens": [...] }, ... } }
+ * We parse ['data'] to get the entire data object, then manually iterate sets, cards, and tokens
  */
 async function convertMtgJsonToNdjson(inputPath, outputPath) {
-  console.log(`🔄 Converting MTGJson to NDJSON (streaming)...`);
+  console.log(`🔄 Converting MTGJson to NDJSON (streaming with manual iteration)...`);
   
   return new Promise((resolve, reject) => {
     const input = createReadStream(inputPath);
     const output = createWriteStream(outputPath, { encoding: 'utf8' });
-    const pipeline = input.pipe(parser()).pipe(streamObject());
     
-    let cardCount = 0;
+    // Parse just ['data'] to get the entire data object
+    const pipeline = input.pipe(JSONStream.parse(['data']));
+    
     let versionCount = 0;
+    let setCount = 0;
 
-    pipeline.on('data', ({ key, value }) => {
-      // key = card name, value = array of printings
-      if (Array.isArray(value)) {
-        for (const printing of value) {
-          try {
-            const line = JSON.stringify({
-              name: key,
-              ...printing
-            });
-            output.write(line + '\n');
-            versionCount++;
-            
-            if (versionCount % 10000 === 0) {
-              console.log(`  Converted ${versionCount} card versions...`);
+    pipeline.on('data', (dataObj) => {
+      // dataObj is the entire data object: { "10E": {...}, "2ED": {...}, ... }
+      console.log(`  Processing data object with sets...`);
+      
+      if (typeof dataObj === 'object' && dataObj !== null) {
+        // Iterate through each set
+        for (const [setCode, setData] of Object.entries(dataObj)) {
+          if (typeof setData !== 'object' || setData === null) continue;
+          
+          setCount++;
+          
+          // Get the cards array from this set
+          const cards = setData.cards;
+          if (Array.isArray(cards)) {
+            for (const card of cards) {
+              if (card && typeof card === 'object') {
+                try {
+                  const line = JSON.stringify(card);
+                  output.write(line + '\r\n');
+                  versionCount++;
+                  
+                  if (versionCount % 20000 === 0) {
+                    console.log(`  ✓ Converted ${versionCount} cards...`);
+                  }
+                } catch (err) {
+                  console.error(`Error writing card from ${setCode}:`, err.message);
+                }
+              }
             }
-          } catch (err) {
-            console.error(`Error writing card ${key}:`, err.message);
+          }
+          
+          // Also process tokens array (contains tokens, emblems, art cards)
+          const tokens = setData.tokens;
+          if (Array.isArray(tokens)) {
+            for (const token of tokens) {
+              if (token && typeof token === 'object') {
+                try {
+                  const line = JSON.stringify(token);
+                  output.write(line + '\r\n');
+                  versionCount++;
+                  
+                  if (versionCount % 20000 === 0) {
+                    console.log(`  ✓ Converted ${versionCount} cards/tokens...`);
+                  }
+                } catch (err) {
+                  console.error(`Error writing token from ${setCode}:`, err.message);
+                }
+              }
+            }
           }
         }
-        cardCount++;
       }
     });
 
     pipeline.on('end', () => {
       output.end();
-      console.log(`✅ Converted ${cardCount} card names, ${versionCount} total versions to NDJSON`);
+      console.log(`\n✅ Conversion complete!`);
+      console.log(`   Sets processed: ${setCount}`);
+      console.log(`   Total cards/tokens converted: ${versionCount}`);
       resolve();
     });
 
     pipeline.on('error', (err) => {
       output.destroy();
+      console.error(`\n❌ JSONStream error:`, err.message);
+      reject(err);
+    });
+
+    output.on('error', (err) => {
+      console.error(`❌ Output write error:`, err.message);
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Convert Scryfall JSON array to NDJSON
+ * Scryfall bulk data is: [{card}, {card}, ...]
+ * We need to convert to: card\ncard\ncard...
+ */
+async function convertScryfallToNdjson(inputPath, outputPath) {
+  console.log(`🔄 Converting Scryfall to NDJSON (streaming JSON array)...`);
+  
+  return new Promise((resolve, reject) => {
+    const input = createReadStream(inputPath);
+    const output = createWriteStream(outputPath, { encoding: 'utf8' });
+    
+    // For a top-level JSON array, use [true] to emit each array element
+    const pipeline = input.pipe(JSONStream.parse([true]));
+    
+    let cardCount = 0;
+
+    pipeline.on('data', (card) => {
+      try {
+        if (card && typeof card === 'object') {
+          const line = JSON.stringify(card);
+          output.write(line + '\n');
+          cardCount++;
+          
+          if (cardCount % 10000 === 0) {
+            console.log(`  ✓ Converted ${cardCount} cards...`);
+          }
+        }
+      } catch (err) {
+        console.error(`Error writing card:`, err.message);
+      }
+    });
+
+    pipeline.on('end', () => {
+      output.end();
+      console.log(`✅ Converted ${cardCount} Scryfall cards to NDJSON`);
+      resolve();
+    });
+
+    pipeline.on('error', (err) => {
+      output.destroy();
+      console.error(`❌ Scryfall conversion error:`, err.message);
       reject(err);
     });
 
@@ -133,30 +220,33 @@ async function convertMtgJsonToNdjson(inputPath, outputPath) {
 }
 
 /**
- * Convert Prices to NDJSON using streaming JSON parser
+ * Convert Prices to NDJSON using JSONStream
+ * Structure: { meta: {...}, data: { uuid: { paper: {...}, mtgo: {...} }, ... } }
  */
 async function convertPricesToNdjson(inputPath, outputPath) {
-  console.log(`🔄 Converting Prices to NDJSON (streaming)...`);
+  console.log(`🔄 Converting Prices to NDJSON (streaming with JSONStream)...`);
   
   return new Promise((resolve, reject) => {
     const input = createReadStream(inputPath);
     const output = createWriteStream(outputPath, { encoding: 'utf8' });
-    const pipeline = input.pipe(parser()).pipe(streamObject());
+    
+    // Use $* to emit objects as { key: uuid, value: priceData }
+    const pipeline = input.pipe(JSONStream.parse(['data', '$*']));
     
     let priceCount = 0;
 
     pipeline.on('data', ({ key, value }) => {
-      // key = scryfallId, value = price data
+      // key = uuid, value = price data
       try {
         const line = JSON.stringify({
-          scryfallId: key,
+          uuid: key,
           ...value
         });
         output.write(line + '\n');
         priceCount++;
         
         if (priceCount % 10000 === 0) {
-          console.log(`  Converted ${priceCount} price entries...`);
+          console.log(`  ✓ Converted ${priceCount} price entries...`);
         }
       } catch (err) {
         console.error(`Error writing price for ${key}:`, err.message);
@@ -220,10 +310,13 @@ async function loadNdjson(filePath, name) {
           if (obj.id) {
             data[obj.id] = obj;
           }
-          // For MTGJson: key by name and store as array
-          else if (obj.name && obj.uuid) {
-            if (!data[obj.name]) data[obj.name] = [];
-            data[obj.name].push(obj);
+          // For MTGJson cards/tokens: key by name and store as array
+          // Tokens may have uuid and identifiers.scryfallId but might not have name
+          else if (obj.uuid) {
+            // Use a unique key for tokens without name: uuid or a combination
+            const key = obj.name || `token_${obj.uuid}`;
+            if (!data[key]) data[key] = [];
+            data[key].push(obj);
           }
           // For Prices: key by scryfallId
           else if (obj.scryfallId) {
@@ -246,9 +339,10 @@ async function loadNdjson(filePath, name) {
         try {
           const obj = JSON.parse(buffer);
           if (obj.id) data[obj.id] = obj;
-          else if (obj.name && obj.uuid) {
-            if (!data[obj.name]) data[obj.name] = [];
-            data[obj.name].push(obj);
+          else if (obj.uuid) {
+            const key = obj.name || `token_${obj.uuid}`;
+            if (!data[key]) data[key] = [];
+            data[key].push(obj);
           }
           else if (obj.scryfallId) data[obj.scryfallId] = obj;
         } catch (err) {}
@@ -264,6 +358,7 @@ async function loadNdjson(filePath, name) {
 
 /**
  * Create a lookup map from MTGJson: UUID → Scryfall ID
+ * Uses MTGJson's identifiers.scryfallId field directly (authoritative source)
  */
 function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
   console.log('🔗 Building MTGJson UUID → Scryfall ID mapping...');
@@ -272,36 +367,52 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
   
   const uuidToScryfallId = {};
   let matchCount = 0;
+  let missingScryfallId = 0;
+  let scryfallIdNotFound = 0;
 
-  for (const [mtgJsonCardName, mtgJsonVersions] of Object.entries(mtgjsonCards)) {
-    if (!Array.isArray(mtgJsonVersions)) continue;
+  // Use MTGJson's identifiers.scryfallId directly - this is the authoritative mapping
+  console.log('  Matching MTGJson cards using identifiers.scryfallId...');
+  let processedCards = 0;
+  
+  for (const [cardName, cardVersions] of Object.entries(mtgjsonCards)) {
+    if (!Array.isArray(cardVersions)) continue;
 
-    for (const mtgJsonCard of mtgJsonVersions) {
-      const mtgJsonUuid = mtgJsonCard.uuid;
+    for (const mtgCard of cardVersions) {
+      const mtgJsonUuid = mtgCard.uuid;
       if (!mtgJsonUuid) continue;
 
-      const matchKey = `${mtgJsonCardName}|${mtgJsonCard.power || ''}|${mtgJsonCard.toughness || ''}|${mtgJsonCard.type || ''}`;
+      // Get the Scryfall ID directly from MTGJson's identifiers field
+      const scryfallId = mtgCard.identifiers?.scryfallId;
+      if (!scryfallId) {
+        missingScryfallId++;
+        processedCards++;
+        continue;
+      }
 
-      for (const scryfallCard of Object.values(scryfallCards)) {
-        if (!scryfallCard || typeof scryfallCard !== 'object') continue;
+      // Verify the Scryfall ID exists in the loaded Scryfall data
+      if (!scryfallCards[scryfallId]) {
+        scryfallIdNotFound++;
+        processedCards++;
+        continue;
+      }
 
-        const scryfallName = scryfallCard.name;
-        const scryfallPower = scryfallCard.power || '';
-        const scryfallToughness = scryfallCard.toughness || '';
-        const scryfallType = scryfallCard.type_line || '';
+      uuidToScryfallId[mtgJsonUuid] = scryfallId;
+      matchCount++;
 
-        const scryfallMatchKey = `${scryfallName}|${scryfallPower}|${scryfallToughness}|${scryfallType}`;
-
-        if (matchKey === scryfallMatchKey) {
-          uuidToScryfallId[mtgJsonUuid] = scryfallCard.id;
-          matchCount++;
-          break;
-        }
+      processedCards++;
+      if (processedCards % 50000 === 0) {
+        console.log(`  ✓ Processed ${processedCards} MTGJson cards, ${matchCount} matched...`);
       }
     }
   }
 
   console.log(`✅ Mapped ${matchCount} MTGJson UUIDs to Scryfall IDs`);
+  if (missingScryfallId > 0) {
+    console.log(`   ⚠️ ${missingScryfallId} cards had no identifiers.scryfallId`);
+  }
+  if (scryfallIdNotFound > 0) {
+    console.log(`   ⚠️ ${scryfallIdNotFound} Scryfall IDs not found in Scryfall data`);
+  }
   return uuidToScryfallId;
 }
 
@@ -336,21 +447,105 @@ function extractTokenParts(mtgjsonCards, uuidToScryfallId) {
 }
 
 /**
+ * Project a Scryfall card to light index format (matching Dart's _projectLightCard)
+ * Keeps only fields needed by the app to reduce file size
+ */
+function projectLightCard(card) {
+  const copyMap = (src, keys) => {
+    if (!src || typeof src !== 'object') return null;
+    const out = {};
+    for (const k of keys) {
+      if (k in src) out[k] = src[k];
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  };
+
+  const copyPrices = (src) => {
+    if (!src || typeof src !== 'object') return null;
+    const out = {};
+    for (const [k, v] of Object.entries(src)) {
+      if (k !== 'tix') out[k] = v;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  };
+
+  const copyPurchaseUris = (src) => {
+    if (!src || typeof src !== 'object') return null;
+    const out = {};
+    for (const [k, v] of Object.entries(src)) {
+      if (k !== 'cardhoarder') out[k] = v;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  };
+
+  const copyFaceList = (faces) => {
+    if (!Array.isArray(faces)) return null;
+    const out = [];
+    for (const f of faces) {
+      if (f && typeof f === 'object') {
+        out.push({
+          name: f.name || null,
+          image_uris: copyMap(f.image_uris, ['normal']),
+          mana_cost: f.mana_cost || null,
+          type_line: f.type_line || null,
+          colors: f.colors || null,
+          power: f.power || null,
+          toughness: f.toughness || null,
+          keywords: f.keywords || null,
+          oracle_text: f.oracle_text || null,
+          flavor_text: f.flavor_text || null,
+          artist: f.artist || null,
+        });
+      }
+    }
+    return out.length > 0 ? out : null;
+  };
+
+  return {
+    image_uris: copyMap(card.image_uris, ['normal']),
+    card_faces: copyFaceList(card.card_faces),
+    layout: card.layout || null,
+    mana_cost: card.mana_cost || null,
+    type_line: card.type_line || null,
+    colors: card.colors || null,
+    color_identity: card.color_identity || null,
+    power: card.power || null,
+    toughness: card.toughness || null,
+    keywords: card.keywords || null,
+    oracle_text: card.oracle_text || null,
+    flavor_text: card.flavor_text || null,
+    released_at: card.released_at || null,
+    artist: card.artist || null,
+    produced_mana: card.produced_mana || null,
+    all_parts: card.all_parts || null,
+    // Fields for name search and Card construction
+    name: card.name || null,
+    set: card.set || null,
+    set_name: card.set_name || null,
+    collector_number: card.collector_number || null,
+    rarity: card.rarity || null,
+  };
+}
+
+/**
  * Merge Scryfall cards with MTGJson tokenParts
  */
-function mergeLightIndex(scryfallCards, cardTokenParts) {
-  console.log('🔀 Merging light index with tokenParts...');
+function mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid = {}) {
+  console.log('🔀 Merging light index with tokenParts and projecting fields...');
   const merged = {};
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
-    merged[scryfallId] = { ...card };
-
+    const projected = projectLightCard(card);
+    projected.mtgjsonUuid = scryfallToUuid[scryfallId] || null;
+    
     if (cardTokenParts[scryfallId]) {
-      merged[scryfallId].tokenParts = cardTokenParts[scryfallId];
+      projected.tokenParts = cardTokenParts[scryfallId];
     }
+    
+    merged[scryfallId] = projected;
   }
 
-  console.log(`✅ Merged ${Object.keys(merged).length} cards`);
+  console.log(`✅ Merged and projected ${Object.keys(merged).length} cards`);
   return merged;
 }
 
@@ -379,7 +574,42 @@ function extractPrices(priceData, scryfallCards) {
 }
 
 /**
- * Main sync function
+ * Extract prices from MTGJson format (keyed by UUID, not Scryfall ID)
+ * Uses the pre-built UUID->Scryfall ID mapping to match prices
+ */
+function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId) {
+  console.log('   Extracting price data...');
+  const prices = {};
+  let matched = 0;
+  let available = 0;
+
+  for (const [uuid, priceEntry] of Object.entries(priceDataByUuid)) {
+    if (!priceEntry || typeof priceEntry !== 'object') continue;
+    available++;
+    
+    // Look up Scryfall ID for this UUID using the pre-built mapping
+    const scryfallId = uuidToScryfallId[uuid];
+    if (!scryfallId) continue;
+    
+    // Verify card exists in light_index
+    const card = lightIndex[scryfallId];
+    if (!card) continue;
+    
+    // Extract price data (paper prices only), keep both IDs only
+    matched++;
+    prices[scryfallId] = {
+      mtgjsonUuid: uuid,
+      prices: priceEntry.paper || {},
+    };
+  }
+
+  console.log(`✅ Extracted prices for ${matched} cards`);
+  
+  return prices;
+}
+
+/**
+ * Main sync function - PRICES ONLY MODE (Scryfall disabled, MTGJson enabled for UUID mapping)
  */
 async function sync() {
   try {
@@ -387,63 +617,82 @@ async function sync() {
       fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     }
 
-    console.log('🚀 Starting Scryfall + MTGJson sync...\n');
+    console.log('🚀 Starting full sync pipeline...\n');
 
-    const SCRYFALL_URL = await getScryfallDownloadUrl();
-
-    const scryfallPath = path.join(OUTPUT_DIR, 'scryfall_temp.json');
-    const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
-    const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
-    
+    const scryfallTempPath = path.join(OUTPUT_DIR, 'scryfall_temp.json');
     const scryfallNdjsonPath = path.join(OUTPUT_DIR, 'scryfall.ndjson');
+    const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const mtgjsonNdjsonPath = path.join(OUTPUT_DIR, 'mtgjson.ndjson');
-    const pricesNdjsonPath = path.join(OUTPUT_DIR, 'prices.ndjson');
+    const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
+    const lightIndexPath = path.join(OUTPUT_DIR, 'light_index.json');
+    const lightPriceIndexPath = path.join(OUTPUT_DIR, 'light_price_index.json');
 
-    console.log('\n⬇️ Step 1: Downloading Scryfall...');
-    await downloadFile(SCRYFALL_URL, scryfallPath, 'Scryfall');
+    // Download and convert Scryfall
+    if (!fs.existsSync(scryfallTempPath)) {
+      const downloadUrl = await getScryfallDownloadUrl();
+      await downloadFile(downloadUrl, scryfallTempPath, 'Scryfall');
+    } else {
+      const stats = fs.statSync(scryfallTempPath);
+      console.log(`✅ Scryfall source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+    }
 
-    console.log('\n⬇️ Step 2: Downloading MTGJson...');
-    await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
+    if (!fs.existsSync(scryfallNdjsonPath)) {
+      await convertScryfallToNdjson(scryfallTempPath, scryfallNdjsonPath);
+    } else {
+      console.log('✅ Scryfall NDJSON exists');
+    }
 
-    console.log('\n⬇️ Step 3: Downloading Prices...');
-    await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
+    // Download and convert MTGJson
+    if (!fs.existsSync(mtgjsonPath)) {
+      await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
+    } else {
+      const stats = fs.statSync(mtgjsonPath);
+      console.log(`✅ MTGJson source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+    }
 
-    console.log('\n🔄 Step 4: Converting to NDJSON...');
-    
-    // Scryfall is already NDJSON, just rename it
-    fs.renameSync(scryfallPath, scryfallNdjsonPath);
-    console.log(`✅ Scryfall is NDJSON (no conversion needed)`);
-    
-    // Convert MTGJson to NDJSON
-    await convertMtgJsonToNdjson(mtgjsonPath, mtgjsonNdjsonPath);
-    
-    // Convert Prices to NDJSON
-    await convertPricesToNdjson(pricesPath, pricesNdjsonPath);
+    if (!fs.existsSync(mtgjsonNdjsonPath)) {
+      await convertMtgJsonToNdjson(mtgjsonPath, mtgjsonNdjsonPath);
+    } else {
+      console.log('✅ MTGJson NDJSON exists');
+    }
 
-    console.log('\n📖 Step 5: Loading data from NDJSON...');
+    // Load converted card data
     const scryfallCards = await loadNdjson(scryfallNdjsonPath, 'Scryfall');
     const mtgjsonCards = await loadNdjson(mtgjsonNdjsonPath, 'MTGJson');
-    const priceData = await loadNdjson(pricesNdjsonPath, 'Prices');
 
+    // Build MTGJson UUID -> Scryfall ID mapping
     const uuidToScryfallId = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
+    const scryfallToUuid = {};
+    for (const [uuid, scryfallId] of Object.entries(uuidToScryfallId)) {
+      if (!scryfallToUuid[scryfallId]) {
+        scryfallToUuid[scryfallId] = uuid;
+      }
+    }
+
+    // Build light index with token parts and UUID
     const cardTokenParts = extractTokenParts(mtgjsonCards, uuidToScryfallId);
-    const mergedIndex = mergeLightIndex(scryfallCards, cardTokenParts);
-    const extractedPrices = extractPrices(priceData, scryfallCards);
+    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid);
+
+    // Download prices
+    if (!fs.existsSync(pricesPath)) {
+      await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
+    } else {
+      const stats = fs.statSync(pricesPath);
+      console.log(`✅ Prices source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+    }
+
+    console.log('\n💰 Processing prices...');
+    const priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
+    console.log(`   Loaded ${Object.keys(priceData).length} price entries from MTGJson`);
+
+    const extractedPrices = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
 
     console.log('\n📝 Writing output files...');
-
-    const lightIndexPath = path.join(OUTPUT_DIR, 'light_index.json');
-    const pricesOutputPath = path.join(OUTPUT_DIR, 'prices.json');
-    const manifestPath = path.join(OUTPUT_DIR, 'manifest.json');
-
-    fs.writeFileSync(lightIndexPath, JSON.stringify(mergedIndex, null, 2));
-    fs.writeFileSync(pricesOutputPath, JSON.stringify(extractedPrices, null, 2));
-
-    const lightIndexHash = await calculateHash(lightIndexPath);
-    const pricesHash = await calculateHash(pricesOutputPath);
+    fs.writeFileSync(lightIndexPath, JSON.stringify(lightIndex, null, 2));
+    fs.writeFileSync(lightPriceIndexPath, JSON.stringify(extractedPrices, null, 2));
 
     const lightIndexSize = fs.statSync(lightIndexPath).size;
-    const pricesSize = fs.statSync(pricesOutputPath).size;
+    const pricesSize = fs.statSync(lightPriceIndexPath).size;
 
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
@@ -451,39 +700,43 @@ async function sync() {
     const manifest = {
       version,
       generatedAt: timestamp,
-      files: {
-        'light_index.json': {
-          sha256: lightIndexHash,
-          size: lightIndexSize,
-          url: `https://github.com/Sammyslamma/Crucible_Server_Data/releases/download/v${version}/light_index.json`,
-        },
-        'prices.json': {
-          sha256: pricesHash,
-          size: pricesSize,
-          url: `https://github.com/Sammyslamma/Crucible_Server_Data/releases/download/v${version}/prices.json`,
-        },
-      },
+      lightIndexCards: Object.keys(lightIndex).length,
+      pricesCards: Object.keys(extractedPrices).length,
+      pricesTotal: Object.keys(priceData).length,
     };
 
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+    // Remove temporary files once the outputs are generated
+    const tempFiles = [
+      scryfallTempPath,
+      scryfallNdjsonPath,
+      mtgjsonPath,
+      mtgjsonNdjsonPath,
+      pricesPath,
+    ];
+
+    for (const tempFile of tempFiles) {
+      if (fs.existsSync(tempFile)) {
+        try {
+          fs.unlinkSync(tempFile);
+          console.log(`🧹 Removed temporary file: ${path.basename(tempFile)}`);
+        } catch (unlinkError) {
+          console.warn(`⚠️ Could not remove ${path.basename(tempFile)}: ${unlinkError.message}`);
+        }
+      }
+    }
 
     console.log(`✅ light_index.json written (${(lightIndexSize / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`✅ prices.json written (${(pricesSize / 1024 / 1024).toFixed(2)} MB)`);
+    console.log(`✅ light_price_index.json written (${(pricesSize / 1024 / 1024).toFixed(2)} MB)`);
     console.log(`✅ manifest.json written`);
 
-    // Cleanup temp files
-    fs.unlinkSync(mtgjsonPath);
-    fs.unlinkSync(pricesPath);
-    fs.unlinkSync(scryfallNdjsonPath);
-    fs.unlinkSync(mtgjsonNdjsonPath);
-    fs.unlinkSync(pricesNdjsonPath);
-
-    console.log('\n✨ Sync complete!');
+    console.log('\n✨ Full sync complete!');
     console.log(`📦 Version: ${version}`);
     console.log(`📊 Stats:`);
-    console.log(`   - Light index cards: ${Object.keys(mergedIndex).length}`);
-    console.log(`   - Cards with prices: ${Object.keys(extractedPrices).length}`);
-    console.log(`   - Cards with tokenParts: ${Object.keys(cardTokenParts).length}`);
+    console.log(`   - Cards in light_index: ${Object.keys(lightIndex).length}`);
+    console.log(`   - Cards in light_price_index: ${Object.keys(extractedPrices).length}`);
+    console.log(`   - Total price entries available: ${Object.keys(priceData).length}`);
   } catch (error) {
     console.error('❌ Error during sync:');
     console.error('Message:', error.message);
