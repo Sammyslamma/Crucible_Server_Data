@@ -565,7 +565,7 @@ function extractPrices(priceData, scryfallCards) {
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     if (!priceData[scryfallId]) continue;
-
+//
     const priceEntry = priceData[scryfallId];
     prices[scryfallId] = {
       name: card.name,
