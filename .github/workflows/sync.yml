@@ -2,7 +2,7 @@ name: Sync Scryfall + MTGJson
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
@@ -22,13 +22,13 @@ jobs:
 
       - run: NODE_OPTIONS="--max-old-space-size=4096" npm run sync
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: v${{ github.run_number }}
-          files: |
-            ./output/light_index.json
-            ./output/prices.json
-            ./output/manifest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Copy output to docs
+        run: mkdir -p docs && cp -r output/* docs/
+
+      - name: Commit and push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add docs/
+          git commit -m "Auto-deploy: $(date)" || echo "No changes"
+          git push
