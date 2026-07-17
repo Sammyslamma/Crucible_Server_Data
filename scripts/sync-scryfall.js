@@ -8,7 +8,7 @@ import JSONStream from 'JSONStream';
 const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
 const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json';
 
-const OUTPUT_DIR = './output';
+const OUTPUT_DIR = './docs';
 
 // Price index configuration - adjust to reduce file size
 const PRICE_CONFIG = {
