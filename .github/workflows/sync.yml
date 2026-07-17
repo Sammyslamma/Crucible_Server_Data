@@ -13,6 +13,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: actions/setup-node@v4
         with:
@@ -21,6 +23,12 @@ jobs:
       - run: npm install
 
       - run: NODE_OPTIONS="--max-old-space-size=4096" npm run sync
+
+      - name: Setup Git LFS
+        run: |
+          git lfs install
+          git lfs track "docs/*.json"
+          git add .gitattributes
 
       - name: Commit and push
         run: |
