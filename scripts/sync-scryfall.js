@@ -790,13 +790,18 @@ async function sync() {
 
     fs.writeFileSync(path.join(OUTPUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
-    // Note: Temp files are preserved for faster re-runs and debugging
-    console.log(`\n📝 Temp files preserved:`);
-    console.log(`   - ${path.basename(scryfallTempPath)}`);
-    console.log(`   - ${path.basename(scryfallNdjsonPath)}`);
-    console.log(`   - ${path.basename(mtgjsonPath)}`);
-    console.log(`   - ${path.basename(mtgjsonNdjsonPath)}`);
-    console.log(`   - ${path.basename(pricesPath)}`);
+    // Clean up temp files
+    console.log(`\n🧹 Cleaning up temp files...`);
+    fs.unlinkSync(scryfallTempPath);
+    fs.unlinkSync(scryfallNdjsonPath);
+    fs.unlinkSync(mtgjsonPath);
+    fs.unlinkSync(mtgjsonNdjsonPath);
+    fs.unlinkSync(pricesPath);
+    console.log(`   - Removed scryfall_temp.json`);
+    console.log(`   - Removed scryfall.ndjson`);
+    console.log(`   - Removed mtgjson_temp.json`);
+    console.log(`   - Removed mtgjson.ndjson`);
+    console.log(`   - Removed prices_temp.json`);
 
     console.log(`\n✅ light_index.json written (${(lightIndexSize / 1024 / 1024).toFixed(2)} MB)`);
     console.log(`✅ light_price_index.json written (${(pricesSize / 1024 / 1024).toFixed(2)} MB)`);
