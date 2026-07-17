@@ -22,9 +22,6 @@ jobs:
 
       - run: NODE_OPTIONS="--max-old-space-size=4096" npm run sync
 
-      - name: Copy output to docs
-        run: mkdir -p docs && cp -r output/* docs/
-
       - name: Commit and push
         run: |
           git config --local user.email "action@github.com"
