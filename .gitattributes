@@ -1,1 +1,3 @@
+# Use LFS for large files
 docs/*.json filter=lfs diff=lfs merge=lfs -text
+docs/*.json.gz filter=lfs diff=lfs merge=lfs -text

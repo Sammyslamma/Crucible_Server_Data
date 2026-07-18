@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { createReadStream, createWriteStream } from 'fs';
+import zlib from 'zlib';
 import JSONStream from 'JSONStream';
 
 const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
@@ -756,6 +757,20 @@ async function sync() {
 
     console.log('\n📝 Writing output files...');
     fs.writeFileSync(lightIndexPath, JSON.stringify(lightIndex, null, 2));
+    
+    // Compress the light index to reduce file size (~25MB instead of 170MB)
+    const lightIndexGzPath = path.join(OUTPUT_DIR, 'light_index.json.gz');
+    const input = fs.createReadStream(lightIndexPath);
+    const output = fs.createWriteStream(lightIndexGzPath);
+    await new Promise((resolve, reject) => {
+      input.pipe(zlib.createGzip()).pipe(output)
+        .on('finish', () => {
+          console.log(`✅ light_index.json.gz written (${(fs.statSync(lightIndexGzPath).size / 1024 / 1024).toFixed(2)} MB)`);
+          resolve();
+        })
+        .on('error', reject);
+    });
+    
     fs.writeFileSync(lightPriceIndexPath, JSON.stringify(extractedPrices));  // Compact format to reduce file size
 
     // Write separate vendor files
@@ -803,7 +818,9 @@ async function sync() {
     console.log(`   - Removed mtgjson.ndjson`);
     console.log(`   - Removed prices_temp.json`);
 
+    const lightIndexGzSize = fs.statSync(lightIndexGzPath).size;
     console.log(`\n✅ light_index.json written (${(lightIndexSize / 1024 / 1024).toFixed(2)} MB)`);
+    console.log(`✅ light_index.json.gz written (${(lightIndexGzSize / 1024 / 1024).toFixed(2)} MB)`);
     console.log(`✅ light_price_index.json written (${(pricesSize / 1024 / 1024).toFixed(2)} MB)`);
     console.log(`✅ manifest.json written`);
 
