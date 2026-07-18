@@ -33,7 +33,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git lfs migrate import --include="docs/*.json,docs/*.json.gz" || true
-          git add docs/
+          git lfs migrate import --include="docs/*.json.gz" || true
+          git add docs/*.json.gz docs/manifest.json
           git commit -m "Auto-deploy: $(date)" || echo "No changes"
           git push

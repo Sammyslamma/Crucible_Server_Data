@@ -566,7 +566,6 @@ function extractPrices(priceData, scryfallCards) {
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     if (!priceData[scryfallId]) continue;
-//
     const priceEntry = priceData[scryfallId];
     prices[scryfallId] = {
       name: card.name,
@@ -677,6 +676,30 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
 }
 
 /**
+ * Write a JSON file and compress it to .gz
+ */
+async function writeAndCompressJson(data, outputPath, gzPath, name) {
+  return new Promise((resolve, reject) => {
+    const json = JSON.stringify(data);
+    const tempPath = outputPath;
+    
+    fs.writeFileSync(tempPath, json);
+    
+    const input = fs.createReadStream(tempPath);
+    const output = fs.createWriteStream(gzPath);
+    const gzip = zlib.createGzip();
+    
+    input.pipe(gzip).pipe(output)
+      .on('finish', () => {
+        fs.unlinkSync(tempPath);
+        console.log(`✅ ${name} written (${(fs.statSync(gzPath).size / 1024 / 1024).toFixed(2)} MB)`);
+        resolve();
+      })
+      .on('error', reject);
+  });
+}
+
+/**
  * Main sync function - PRICES ONLY MODE (Scryfall disabled, MTGJson enabled for UUID mapping)
  */
 async function sync() {
@@ -692,8 +715,6 @@ async function sync() {
     const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const mtgjsonNdjsonPath = path.join(OUTPUT_DIR, 'mtgjson.ndjson');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
-    const lightIndexPath = path.join(OUTPUT_DIR, 'light_index.json');
-    const lightPriceIndexPath = path.join(OUTPUT_DIR, 'light_price_index.json');
 
     // Download and convert Scryfall
     if (!fs.existsSync(scryfallTempPath)) {
@@ -756,38 +777,31 @@ async function sync() {
     const { prices: extractedPrices, pricesByVendor } = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
 
     console.log('\n📝 Writing output files...');
-    fs.writeFileSync(lightIndexPath, JSON.stringify(lightIndex, null, 2));
     
-    // Compress the light index to reduce file size (~25MB instead of 170MB)
-    const lightIndexGzPath = path.join(OUTPUT_DIR, 'light_index.json.gz');
-    const input = fs.createReadStream(lightIndexPath);
-    const output = fs.createWriteStream(lightIndexGzPath);
-    await new Promise((resolve, reject) => {
-      input.pipe(zlib.createGzip()).pipe(output)
-        .on('finish', () => {
-          console.log(`✅ light_index.json.gz written (${(fs.statSync(lightIndexGzPath).size / 1024 / 1024).toFixed(2)} MB)`);
-          resolve();
-        })
-        .on('error', reject);
-    });
-    
-    fs.writeFileSync(lightPriceIndexPath, JSON.stringify(extractedPrices));  // Compact format to reduce file size
-
-    // Write separate vendor files
+    // Build vendor files info for manifest
     const vendorFiles = {};
+    
+    // Write and compress the light index
+    const lightIndexGzPath = path.join(OUTPUT_DIR, 'light_index.json.gz');
+    const lightIndexTempPath = path.join(OUTPUT_DIR, 'light_index_temp.json');
+    await writeAndCompressJson(lightIndex, lightIndexTempPath, lightIndexGzPath, 'light_index.json.gz');
+    
+    // Write and compress the price index
+    const lightPriceIndexGzPath = path.join(OUTPUT_DIR, 'light_price_index.json.gz');
+    const lightPriceIndexTempPath = path.join(OUTPUT_DIR, 'light_price_index_temp.json');
+    await writeAndCompressJson(extractedPrices, lightPriceIndexTempPath, lightPriceIndexGzPath, 'light_price_index.json.gz');
+    
+    // Write separate vendor files (compressed)
     for (const [vendor, vendorPrices] of Object.entries(pricesByVendor)) {
-      const vendorPath = path.join(OUTPUT_DIR, `light_price_index_${vendor}.json`);
-      fs.writeFileSync(vendorPath, JSON.stringify(vendorPrices));
+      const vendorGzPath = path.join(OUTPUT_DIR, `light_price_index_${vendor}.json.gz`);
+      const vendorTempPath = path.join(OUTPUT_DIR, `light_price_index_${vendor}_temp.json`);
+      
+      await writeAndCompressJson(vendorPrices, vendorTempPath, vendorGzPath, `light_price_index_${vendor}.json.gz`);
       vendorFiles[vendor] = {
-        path: vendorPath,
-        size: fs.statSync(vendorPath).size,
+        size: fs.statSync(vendorGzPath).size,
         cards: Object.keys(vendorPrices).length,
       };
-      console.log(`✅ light_price_index_${vendor}.json written (${(vendorFiles[vendor].size / 1024 / 1024).toFixed(2)} MB)`);
     }
-
-    const lightIndexSize = fs.statSync(lightIndexPath).size;
-    const pricesSize = fs.statSync(lightPriceIndexPath).size;
 
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
@@ -818,11 +832,7 @@ async function sync() {
     console.log(`   - Removed mtgjson.ndjson`);
     console.log(`   - Removed prices_temp.json`);
 
-    const lightIndexGzSize = fs.statSync(lightIndexGzPath).size;
-    console.log(`\n✅ light_index.json written (${(lightIndexSize / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`✅ light_index.json.gz written (${(lightIndexGzSize / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`✅ light_price_index.json written (${(pricesSize / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`✅ manifest.json written`);
+    console.log(`\n✅ manifest.json written`);
 
     console.log('\n✨ Full sync complete!');
     console.log(`📦 Version: ${version}`);
