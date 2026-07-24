@@ -2,7 +2,7 @@ name: Sync Scryfall + MTGJson
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
@@ -13,6 +13,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: actions/setup-node@v4
         with:
@@ -20,8 +22,14 @@ jobs:
 
       - run: npm install
 
+      - name: Install Git LFS
+        run: |
+          git lfs install
+          git lfs pull
+
       - run: NODE_OPTIONS="--max-old-space-size=4096" npm run sync
 
+<<<<<<< HEAD
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -32,3 +40,13 @@ jobs:
             ./output/manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+=======
+      - name: Commit and push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git lfs migrate import --include="docs/*.json.gz" || true
+          git add docs/*.json.gz docs/manifest.json
+          git commit -m "Auto-deploy: $(date)" || echo "No changes"
+          git push
+>>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
