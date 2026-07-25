@@ -536,24 +536,44 @@ function projectLightCard(card) {
 }
 
 /**
- * Merge Scryfall cards with MTGJson tokenParts
+ * Merge Scryfall cards with MTGJson data and project to light index format.
+ * Now also includes relatedTokens for double-faced token cards, derived
+ * from the already-built cardTokenParts map.
+ *
+ * relatedTokens logic:
+ * cardTokenParts[scryfallId] contains ALL faces of a double-faced token
+ * (including the token itself). Filtering out the current scryfallId gives
+ * the OTHER faces — these are the relatedTokens.
+ * Single-faced tokens have no cardTokenParts entry, or their entry only
+ * contains their own ID, so relatedTokens will be empty and not added.
  */
 function mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid = {}) {
-  console.log('🔀 Merging light index with tokenParts and projecting fields...');
+  console.log('🔀 Merging light index with tokenParts, relatedTokens, and projecting fields...');
   const merged = {};
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     const projected = projectLightCard(card);
     projected.mtgjsonUuid = scryfallToUuid[scryfallId] || null;
-    
+
     if (cardTokenParts[scryfallId]) {
       projected.tokenParts = cardTokenParts[scryfallId];
+
+      // Derive relatedTokens: other faces of this double-faced token.
+      // cardTokenParts includes the token's own Scryfall ID, so filter it out.
+      const relatedTokens = cardTokenParts[scryfallId].filter(id => id !== scryfallId);
+      if (relatedTokens.length > 0) {
+        projected.relatedTokens = relatedTokens;
+      }
     }
-    
+
     merged[scryfallId] = projected;
   }
 
   console.log(`✅ Merged and projected ${Object.keys(merged).length} cards`);
+
+  const doubleFacedCount = Object.values(merged).filter(c => c.relatedTokens).length;
+  console.log(`   Double-faced token faces detected: ${doubleFacedCount}`);
+
   return merged;
 }
 
