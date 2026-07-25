@@ -3,10 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { createReadStream, createWriteStream } from 'fs';
-<<<<<<< HEAD
-=======
 import zlib from 'zlib';
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
 import JSONStream from 'JSONStream';
 
 const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
@@ -569,10 +566,7 @@ function extractPrices(priceData, scryfallCards) {
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     if (!priceData[scryfallId]) continue;
-<<<<<<< HEAD
 
-=======
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
     const priceEntry = priceData[scryfallId];
     prices[scryfallId] = {
       name: card.name,
@@ -588,10 +582,6 @@ function extractPrices(priceData, scryfallCards) {
 }
 
 /**
-<<<<<<< HEAD
- * Extract prices from MTGJson format (keyed by UUID, not Scryfall ID)
- * Uses the pre-built UUID->Scryfall ID mapping to match prices
-=======
  * Filter paper prices to only include configured vendors and remove empty objects
  */
 function filterPaperPrices(paper) {
@@ -635,13 +625,10 @@ function filterPaperPrices(paper) {
  * Extract prices from MTGJson format (keyed by UUID, not Scryfall ID)
  * Uses the pre-built UUID->Scryfall ID mapping to match prices
  * Returns both combined and per-vendor price data
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
  */
 function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId) {
   console.log('   Extracting price data...');
   const prices = {};
-<<<<<<< HEAD
-=======
   const pricesByVendor = {};  // { vendor: { scryfallId: { mtgjsonUuid, prices } } }
   
   // Initialize vendor maps
@@ -649,7 +636,6 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
     pricesByVendor[vendor] = {};
   }
   
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
   let matched = 0;
   let available = 0;
 
@@ -665,14 +651,6 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
     const card = lightIndex[scryfallId];
     if (!card) continue;
     
-<<<<<<< HEAD
-    // Extract price data (paper prices only), keep both IDs only
-    matched++;
-    prices[scryfallId] = {
-      mtgjsonUuid: uuid,
-      prices: priceEntry.paper || {},
-    };
-=======
     // Filter paper prices to only include configured vendors and remove empty objects
     const filteredPrices = filterPaperPrices(priceEntry.paper);
     if (!filteredPrices) continue;
@@ -691,14 +669,10 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
         prices: vendorPrices,
       };
     }
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
   }
 
   console.log(`✅ Extracted prices for ${matched} cards`);
   
-<<<<<<< HEAD
-  return prices;
-=======
   return { prices, pricesByVendor };
 }
 
@@ -724,7 +698,6 @@ async function writeAndCompressJson(data, outputPath, gzPath, name) {
       })
       .on('error', reject);
   });
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
 }
 
 /**
@@ -743,11 +716,6 @@ async function sync() {
     const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const mtgjsonNdjsonPath = path.join(OUTPUT_DIR, 'mtgjson.ndjson');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
-<<<<<<< HEAD
-    const lightIndexPath = path.join(OUTPUT_DIR, 'light_index.json');
-    const lightPriceIndexPath = path.join(OUTPUT_DIR, 'light_price_index.json');
-=======
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
 
     // Download and convert Scryfall
     if (!fs.existsSync(scryfallTempPath)) {
@@ -807,16 +775,6 @@ async function sync() {
     const priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
     console.log(`   Loaded ${Object.keys(priceData).length} price entries from MTGJson`);
 
-<<<<<<< HEAD
-    const extractedPrices = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
-
-    console.log('\n📝 Writing output files...');
-    fs.writeFileSync(lightIndexPath, JSON.stringify(lightIndex, null, 2));
-    fs.writeFileSync(lightPriceIndexPath, JSON.stringify(extractedPrices, null, 2));
-
-    const lightIndexSize = fs.statSync(lightIndexPath).size;
-    const pricesSize = fs.statSync(lightPriceIndexPath).size;
-=======
     const { prices: extractedPrices, pricesByVendor } = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
 
     console.log('\n📝 Writing output files...');
@@ -845,7 +803,6 @@ async function sync() {
         cards: Object.keys(vendorPrices).length,
       };
     }
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
 
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
@@ -856,35 +813,6 @@ async function sync() {
       lightIndexCards: Object.keys(lightIndex).length,
       pricesCards: Object.keys(extractedPrices).length,
       pricesTotal: Object.keys(priceData).length,
-<<<<<<< HEAD
-    };
-
-    fs.writeFileSync(path.join(OUTPUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));
-
-    // Remove temporary files once the outputs are generated
-    const tempFiles = [
-      scryfallTempPath,
-      scryfallNdjsonPath,
-      mtgjsonPath,
-      mtgjsonNdjsonPath,
-      pricesPath,
-    ];
-
-    for (const tempFile of tempFiles) {
-      if (fs.existsSync(tempFile)) {
-        try {
-          fs.unlinkSync(tempFile);
-          console.log(`🧹 Removed temporary file: ${path.basename(tempFile)}`);
-        } catch (unlinkError) {
-          console.warn(`⚠️ Could not remove ${path.basename(tempFile)}: ${unlinkError.message}`);
-        }
-      }
-    }
-
-    console.log(`✅ light_index.json written (${(lightIndexSize / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`✅ light_price_index.json written (${(pricesSize / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`✅ manifest.json written`);
-=======
       vendorFiles: Object.fromEntries(
         Object.entries(vendorFiles).map(([v, f]) => [v, { size: f.size, cards: f.cards }])
       ),
@@ -919,7 +847,6 @@ async function sync() {
     }
 
     console.log(`\n✅ manifest.json written`);
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
 
     console.log('\n✨ Full sync complete!');
 
@@ -928,10 +855,7 @@ async function sync() {
     console.log(`   - Cards in light_index: ${Object.keys(lightIndex).length}`);
     console.log(`   - Cards in light_price_index: ${Object.keys(extractedPrices).length}`);
     console.log(`   - Total price entries available: ${Object.keys(priceData).length}`);
-<<<<<<< HEAD
-=======
     console.log(`   - Vendor files: ${Object.keys(vendorFiles).map(v => `${v} (${vendorFiles[v].cards} cards)`).join(', ')}`);
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
   } catch (error) {
     console.error('❌ Error during sync:');
     console.error('Message:', error.message);
