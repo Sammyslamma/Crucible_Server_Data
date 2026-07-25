@@ -819,22 +819,36 @@ async function sync() {
 
     fs.writeFileSync(path.join(OUTPUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
-    // Clean up temp files
+    // Clean up temp files (with error handling for missing files)
     console.log(`\n🧹 Cleaning up temp files...`);
-    fs.unlinkSync(scryfallTempPath);
-    fs.unlinkSync(scryfallNdjsonPath);
-    fs.unlinkSync(mtgjsonPath);
-    fs.unlinkSync(mtgjsonNdjsonPath);
-    fs.unlinkSync(pricesPath);
-    console.log(`   - Removed scryfall_temp.json`);
-    console.log(`   - Removed scryfall.ndjson`);
-    console.log(`   - Removed mtgjson_temp.json`);
-    console.log(`   - Removed mtgjson.ndjson`);
-    console.log(`   - Removed prices_temp.json`);
+    const tempFiles = [
+      { path: scryfallTempPath, name: 'scryfall_temp.json' },
+      { path: scryfallNdjsonPath, name: 'scryfall.ndjson' },
+      { path: mtgjsonPath, name: 'mtgjson_temp.json' },
+      { path: pricesPath, name: 'prices_temp.json' },
+    ];
+    for (const file of tempFiles) {
+      try {
+        if (fs.existsSync(file.path)) {
+          fs.unlinkSync(file.path);
+          console.log(`   - Removed ${file.name}`);
+        } else {
+          console.log(`   - Skipped ${file.name} (not found)`);
+        }
+      } catch (err) {
+        console.log(`   - Warning: could not remove ${file.name}: ${err.message}`);
+      }
+    }
+    // Preserve mtgjson.ndjson for future use (it's expensive to regenerate)
+    if (fs.existsSync(mtgjsonNdjsonPath)) {
+      const stats = fs.statSync(mtgjsonNdjsonPath);
+      console.log(`   - Kept mtgjson.ndjson (${(stats.size / 1024 / 1024).toFixed(1)}MB) for future use`);
+    }
 
     console.log(`\n✅ manifest.json written`);
 
     console.log('\n✨ Full sync complete!');
+
     console.log(`📦 Version: ${version}`);
     console.log(`📊 Stats:`);
     console.log(`   - Cards in light_index: ${Object.keys(lightIndex).length}`);
