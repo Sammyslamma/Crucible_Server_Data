@@ -29,24 +29,23 @@ jobs:
 
       - run: NODE_OPTIONS="--max-old-space-size=4096" npm run sync
 
-<<<<<<< HEAD
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: v${{ github.run_number }}
-          files: |
-            ./output/light_index.json
-            ./output/prices.json
-            ./output/manifest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-=======
-      - name: Commit and push
+      - name: Deploy data to data branch
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git lfs migrate import --include="docs/*.json.gz" || true
-          git add docs/*.json.gz docs/manifest.json
-          git commit -m "Auto-deploy: $(date)" || echo "No changes"
-          git push
->>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
+
+          # Switch to an orphan branch (no history from main)
+          git checkout --orphan data
+
+          # Remove everything except the generated docs
+          git rm -rf .
+
+          # Move generated files from docs/ to the root of the data branch
+          mv docs/* . 2>/dev/null || true
+
+          # Add and commit only the data files
+          git add *.json.gz manifest.json
+          git commit -m "Auto-deploy data: $(date)"
+
+          # Force push to the data branch (rewriting history is fine — data snapshots)
+          git push origin data --force
