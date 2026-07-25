@@ -425,27 +425,49 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
 }
 
 /**
- * Extract tokenParts from MTGJson and convert UUIDs to Scryfall IDs
+ * Extract tokenParts from MTGJson and convert UUIDs to Scryfall IDs.
+ *
+ * MTGJson v5 nests tokenParts inside tokenProducts[], and each entry is
+ * an object like {"uuid": "..."} rather than a raw UUID string.
+ *
+ * A token can appear in multiple physical products (e.g. the same Horror
+ * face is paired with Centaur in one product and Eldrazi Horror in another).
+ * We collect ALL unique related Scryfall IDs across all products.
  */
 function extractTokenParts(mtgjsonCards, uuidToScryfallId) {
-  console.log('🎴 Extracting tokenParts from MTGJson...');
+  console.log('🎴 Extracting tokenParts from MTGJson (tokenProducts[].tokenParts)...');
   const cardTokenParts = {};
 
   for (const versions of Object.values(mtgjsonCards)) {
     if (!Array.isArray(versions)) continue;
 
     for (const card of versions) {
-      if (!card.uuid || !card.tokenParts || !Array.isArray(card.tokenParts)) continue;
+      // tokenParts live inside tokenProducts[] in MTGJson v5
+      if (!card.uuid || !card.tokenProducts || !Array.isArray(card.tokenProducts)) continue;
 
       const scryfallId = uuidToScryfallId[card.uuid];
       if (!scryfallId) continue;
 
-      const tokenScryfallIds = card.tokenParts
-        .map((tokenUuid) => uuidToScryfallId[tokenUuid])
-        .filter((id) => id);
+      // Collect all unique related token Scryfall IDs across all products
+      const allTokenScryfallIds = new Set();
 
-      if (tokenScryfallIds.length > 0) {
-        cardTokenParts[scryfallId] = tokenScryfallIds;
+      for (const product of card.tokenProducts) {
+        if (!product.tokenParts || !Array.isArray(product.tokenParts)) continue;
+
+        for (const tokenPart of product.tokenParts) {
+          // tokenPart is { uuid: "..." }, extract the uuid string
+          const tokenUuid = tokenPart.uuid;
+          if (!tokenUuid) continue;
+
+          const tokenScryfallId = uuidToScryfallId[tokenUuid];
+          if (tokenScryfallId) {
+            allTokenScryfallIds.add(tokenScryfallId);
+          }
+        }
+      }
+
+      if (allTokenScryfallIds.size > 0) {
+        cardTokenParts[scryfallId] = [...allTokenScryfallIds];
       }
     }
   }
