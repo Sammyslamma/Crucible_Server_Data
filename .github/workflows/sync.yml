@@ -29,6 +29,18 @@ jobs:
 
       - run: NODE_OPTIONS="--max-old-space-size=4096" npm run sync
 
+<<<<<<< HEAD
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          files: |
+            ./output/light_index.json
+            ./output/prices.json
+            ./output/manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+=======
       - name: Commit and push
         run: |
           git config --local user.email "action@github.com"
@@ -37,3 +49,4 @@ jobs:
           git add docs/*.json.gz docs/manifest.json
           git commit -m "Auto-deploy: $(date)" || echo "No changes"
           git push
+>>>>>>> bea862d89e6f2e51adc42e77c6eb05ae400c022f
