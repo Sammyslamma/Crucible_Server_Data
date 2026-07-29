@@ -18,6 +18,13 @@ const PRICE_CONFIG = {
   includeEmptyObjects: false               // Set true to keep empty buylist/retail objects
 };
 
+// Temp file cleanup: set to 1 to delete, 0 to keep (for data extraction)
+const CLEANUP_SCRYFALL_GZ = 1;       // scryfall.jsonl.gz
+const CLEANUP_SCRYFALL_NDJSON = 1;   // scryfall.ndjson
+const CLEANUP_MTGJSON_TEMP = 1;      // mtgjson_temp.json
+const CLEANUP_MTGJSON_NDJSON = 0;    // mtgjson.ndjson
+const CLEANUP_PRICES_TEMP = 1;       // prices_temp.json
+
 /**
  * Fetch the actual Scryfall download URL from metadata
  */
@@ -32,8 +39,14 @@ async function getScryfallDownloadUrl() {
   if (!defaultCards) {
     throw new Error('default_cards bulk data not found in Scryfall metadata');
   }
+  // Scryfall now serves .jsonl.gz files (gzipped NDJSON).
+  // Use jsonl_download_uri; fall back to download_uri if present.
+  const downloadUrl = defaultCards.jsonl_download_uri || defaultCards.download_uri;
+  if (!downloadUrl) {
+    throw new Error('No download URL found in Scryfall metadata');
+  }
   console.log(`✅ Got Scryfall download URL`);
-  return defaultCards.download_uri;
+  return downloadUrl;
 }
 
 /**
@@ -753,23 +766,36 @@ async function sync() {
 
     console.log('🚀 Starting full sync pipeline...\n');
 
-    const scryfallTempPath = path.join(OUTPUT_DIR, 'scryfall_temp.json');
+    // Scryfall now serves .jsonl.gz files (gzipped NDJSON)
+    const scryfallGzPath = path.join(OUTPUT_DIR, 'scryfall.jsonl.gz');
     const scryfallNdjsonPath = path.join(OUTPUT_DIR, 'scryfall.ndjson');
     const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const mtgjsonNdjsonPath = path.join(OUTPUT_DIR, 'mtgjson.ndjson');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
 
-    // Download and convert Scryfall
-    if (!fs.existsSync(scryfallTempPath)) {
+    // Download Scryfall (.jsonl.gz - gzipped NDJSON)
+    if (!fs.existsSync(scryfallGzPath)) {
       const downloadUrl = await getScryfallDownloadUrl();
-      await downloadFile(downloadUrl, scryfallTempPath, 'Scryfall');
+      await downloadFile(downloadUrl, scryfallGzPath, 'Scryfall');
     } else {
-      const stats = fs.statSync(scryfallTempPath);
+      const stats = fs.statSync(scryfallGzPath);
       console.log(`✅ Scryfall source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
     }
 
+    // Decompress .jsonl.gz to .ndjson (it's already NDJSON, just gzipped)
     if (!fs.existsSync(scryfallNdjsonPath)) {
-      await convertScryfallToNdjson(scryfallTempPath, scryfallNdjsonPath);
+      console.log(`🔄 Decompressing Scryfall NDJSON...`);
+      await new Promise((resolve, reject) => {
+        const input = createReadStream(scryfallGzPath);
+        const output = createWriteStream(scryfallNdjsonPath);
+        input.pipe(zlib.createGunzip()).pipe(output)
+          .on('finish', () => {
+            const stats = fs.statSync(scryfallNdjsonPath);
+            console.log(`✅ Decompressed Scryfall NDJSON (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+            resolve();
+          })
+          .on('error', reject);
+      });
     } else {
       console.log('✅ Scryfall NDJSON exists');
     }
@@ -865,12 +891,17 @@ async function sync() {
     // Clean up temp files (with error handling for missing files)
     console.log(`\n🧹 Cleaning up temp files...`);
     const tempFiles = [
-      { path: scryfallTempPath, name: 'scryfall_temp.json' },
-      { path: scryfallNdjsonPath, name: 'scryfall.ndjson' },
-      { path: mtgjsonPath, name: 'mtgjson_temp.json' },
-      { path: pricesPath, name: 'prices_temp.json' },
+      { path: scryfallGzPath, name: 'scryfall.jsonl.gz', flag: CLEANUP_SCRYFALL_GZ },
+      { path: scryfallNdjsonPath, name: 'scryfall.ndjson', flag: CLEANUP_SCRYFALL_NDJSON },
+      { path: mtgjsonPath, name: 'mtgjson_temp.json', flag: CLEANUP_MTGJSON_TEMP },
+      { path: mtgjsonNdjsonPath, name: 'mtgjson.ndjson', flag: CLEANUP_MTGJSON_NDJSON },
+      { path: pricesPath, name: 'prices_temp.json', flag: CLEANUP_PRICES_TEMP },
     ];
     for (const file of tempFiles) {
+      if (!file.flag) {
+        console.log(`   - Kept ${file.name} (cleanup disabled)`);
+        continue;
+      }
       try {
         if (fs.existsSync(file.path)) {
           fs.unlinkSync(file.path);
@@ -881,11 +912,6 @@ async function sync() {
       } catch (err) {
         console.log(`   - Warning: could not remove ${file.name}: ${err.message}`);
       }
-    }
-    // Preserve mtgjson.ndjson for future use (it's expensive to regenerate)
-    if (fs.existsSync(mtgjsonNdjsonPath)) {
-      const stats = fs.statSync(mtgjsonNdjsonPath);
-      console.log(`   - Kept mtgjson.ndjson (${(stats.size / 1024 / 1024).toFixed(1)}MB) for future use`);
     }
 
     console.log(`\n✅ manifest.json written`);
