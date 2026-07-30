@@ -171,6 +171,7 @@ hasAlternativePairings: Value(card.hasAlternativePairings),
 - Small icon/badge next to the card name
 - Text: "Alternative pairing available"
 - Button: "View alternatives" or "Change pairing"
+- Could possibly add this in card dialog window or possibly in the collection UI in name section
 
 **When clicked, show:**
 - Current pairing (e.g., "Beast 19 // Beast 18")
