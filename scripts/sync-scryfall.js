@@ -445,48 +445,66 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
  *
  * A token can appear in multiple physical products (e.g. the same Horror
  * face is paired with Centaur in one product and Eldrazi Horror in another).
- * We collect ALL unique related Scryfall IDs across all products.
+ * We collect ALL unique related Scryfall IDs across all products (cardTokenParts)
+ * AND per-product pairings for manual double-faced token detection (cardTokenPairings).
  */
 function extractTokenParts(mtgjsonCards, uuidToScryfallId) {
-  console.log('🎴 Extracting tokenParts from MTGJson (tokenProducts[].tokenParts)...');
-  const cardTokenParts = {};
+  console.log('🎴 Extracting tokenParts from MTGJson (per-product pairs)...');
+
+  const cardTokenParts = {};     // unchanged — flat set for relatedTokens
+  const cardTokenPairings = {};  // new — per-product pairs for tokenPairings
 
   for (const versions of Object.values(mtgjsonCards)) {
     if (!Array.isArray(versions)) continue;
 
     for (const card of versions) {
-      // tokenParts live inside tokenProducts[] in MTGJson v5
       if (!card.uuid || !card.tokenProducts || !Array.isArray(card.tokenProducts)) continue;
 
       const scryfallId = uuidToScryfallId[card.uuid];
       if (!scryfallId) continue;
 
-      // Collect all unique related token Scryfall IDs across all products
       const allTokenScryfallIds = new Set();
+      const pairings = [];
 
       for (const product of card.tokenProducts) {
         if (!product.tokenParts || !Array.isArray(product.tokenParts)) continue;
 
+        const pair = [];
         for (const tokenPart of product.tokenParts) {
-          // tokenPart is { uuid: "..." }, extract the uuid string
           const tokenUuid = tokenPart.uuid;
           if (!tokenUuid) continue;
-
           const tokenScryfallId = uuidToScryfallId[tokenUuid];
           if (tokenScryfallId) {
+            pair.push(tokenScryfallId);
             allTokenScryfallIds.add(tokenScryfallId);
           }
         }
+
+        // Only store pairs of exactly 2 (one physical double-faced token = 2 faces)
+        if (pair.length === 2) {
+          pairings.push(pair);
+        }
       }
 
+      // Existing flat set — unchanged, used downstream for relatedTokens
       if (allTokenScryfallIds.size > 0) {
         cardTokenParts[scryfallId] = [...allTokenScryfallIds];
+      }
+
+      // New per-product pairings — only store if this card pairs with another card
+      if (pairings.length > 0) {
+        const hasOtherFace = pairings.some(pair => pair.some(id => id !== scryfallId));
+        if (hasOtherFace) {
+          cardTokenPairings[scryfallId] = pairings;
+        }
       }
     }
   }
 
   console.log(`✅ Extracted ${Object.keys(cardTokenParts).length} cards with tokenParts`);
-  return cardTokenParts;
+  console.log(`✅ Extracted ${Object.keys(cardTokenPairings).length} cards with tokenPairings`);
+
+  return { cardTokenParts, cardTokenPairings };
 }
 
 /**
@@ -582,14 +600,15 @@ function projectLightCard(card) {
  * Single-faced tokens have no cardTokenParts entry, or their entry only
  * contains their own ID, so relatedTokens will be empty and not added.
  */
-function mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid = {}) {
-  console.log('🔀 Merging light index with tokenParts, relatedTokens, and projecting fields...');
+function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}) {
+  console.log('🔀 Merging light index with tokenParts, tokenPairings, relatedTokens, and projecting fields...');
   const merged = {};
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     const projected = projectLightCard(card);
     projected.mtgjsonUuid = scryfallToUuid[scryfallId] || null;
 
+    // EXISTING — unchanged
     if (cardTokenParts[scryfallId]) {
       projected.tokenParts = cardTokenParts[scryfallId];
 
@@ -601,13 +620,27 @@ function mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid = {}) {
       }
     }
 
+    // NEW — only set if Scryfall did not already mark this as double_faced_token.
+    // We cannot use !projected.relatedTokens as the guard because Beast 18/19
+    // also get relatedTokens from the flat set above (they have tokenProducts),
+    // which would block tokenPairings from ever being set for them.
+    // Checking layout === 'double_faced_token' correctly targets only the cards
+    // Scryfall natively handles, leaving layout: 'token' cards like Beast 18/19
+    // to receive tokenPairings regardless of whether relatedTokens is also set.
+    if (cardTokenPairings[scryfallId] && projected.layout !== 'double_faced_token') {
+      projected.tokenPairings = cardTokenPairings[scryfallId];
+      projected.hasAlternativePairings = cardTokenPairings[scryfallId].length > 1;
+    }
+
     merged[scryfallId] = projected;
   }
 
   console.log(`✅ Merged and projected ${Object.keys(merged).length} cards`);
 
   const doubleFacedCount = Object.values(merged).filter(c => c.relatedTokens).length;
-  console.log(`   Double-faced token faces detected: ${doubleFacedCount}`);
+  const manualPairingCount = Object.values(merged).filter(c => c.tokenPairings).length;
+  console.log(`   Double-faced token faces (Scryfall layout): ${doubleFacedCount}`);
+  console.log(`   Manually paired token faces (MTGJson): ${manualPairingCount}`);
 
   return merged;
 }
@@ -828,8 +861,9 @@ async function sync() {
     }
 
     // Build light index with token parts and UUID
-    const cardTokenParts = extractTokenParts(mtgjsonCards, uuidToScryfallId);
-    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid);
+    const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
+    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid);
+
 
     // Download prices
     if (!fs.existsSync(pricesPath)) {
