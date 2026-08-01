@@ -1,227 +1,132 @@
-# Double-Faced Token Support — Full Implementation Plan (v4)
+# Double-Faced Token Pairing — Master Implementation Plan
 
-## Overview
+## Background
+Tokens like Beast 18/19 from CMR are physically printed as double-faced token
+cards but Scryfall does not assign them `layout: double_faced_token`. MTGJson's
+`tokenProducts[].tokenParts[]` structure contains the per-product pairing data.
 
-This document is the single source of truth for implementing double-faced token
-support across two separate projects:
+### Key Data
+- Beast 18 (`scryfallId: 06d59ee8`, `uuid: 8903fa50`) — one product: [Beast18, Beast19]
+- Beast 19 (`scryfallId: 50d90039`, `uuid: cf393d4e`) — two products: [Beast18, Beast19], [Beast19, Elephant20]
+- Elephant 20 (`scryfallId: 8c4d495a`, `uuid: 17970de2`) — two products: [Elephant20, Soldier], [Beast19, Elephant20]
 
-- **Project 1 — Sync Script** (Node.js): `scripts/sync-scryfall.js`
-- **Project 2 — Flutter App**: the MTG collection tracker
-
-Both projects must be updated together. The sync script produces the data the
-Flutter app consumes, so the sync script changes must be deployed first.
-
----
-
-## Background: What Are Double-Faced Tokens?
-
-In Magic: The Gathering, some token cards are physically printed with a different
-token on each side of the card. For example, the Commander Legends: Battle for
-Baldur's Gate (CLB) set includes a token card that has:
-
-- **Front face**: Centaur (3/3 green, Protection from black)
-- **Back face**: Horror (1/1 black)
-
-This is ONE physical card that lives in ONE location in a collection. The player
-flips it over depending on which token they need.
+### Rules
+- Existing `relatedTokens` logic for `layout: double_faced_token` cards is NOT touched
+- `tokenPairings` is additive — only set when `layout !== 'double_faced_token'` (NOT guarded by `!relatedTokens` — Beast 18/19 have both relatedTokens from the flat set AND need tokenPairings)
+- Default pairing = `tokenPairings[0]`, other face = the ID in the pair that is not this card
+- Canonical face when deduplicating = alphabetically first card name; when names are equal (e.g. Beast vs Beast) the lower collector number wins — Beast #18 is front, Beast #19 is back
+- Image assignment: canonical face (alphabetically first) always stored as front image; if the imported card is alphabetically second its image is renamed to `_back.jpg` and the other face's image becomes the front
+- `combinedName` is set by `extractCardDetails` and consumed by `_ensureAlphabeticalFaceOrder` — no conflict, they run sequentially on different objects
+- Existing collections are wiped — no migration needed
+- Edit flow for swapping pairings is out of scope for this plan
 
 ---
 
-## The Problem
+## Part 1 — Node.js Sync Script (mtgjson_sync.js)
 
-### How Scryfall Represents These Cards
+### Change 1 — Replace `extractTokenParts`
 
-Scryfall treats each face of a double-faced token as a **completely independent
-card** with its own unique Scryfall ID, its own name, and no reference to the
-other face. There is no field in Scryfall data that says "this token and that
-token are two faces of the same physical card."
-
-### How MTGJson Represents These Cards
-
-MTGJson has a field called `tokenParts` on token objects. When a token is part
-of a double-faced token card, its `tokenParts` array contains the MTGJson UUIDs
-of **all faces** of that physical token card — including itself.
-
-Example from MTGJson:
-
-```
-Centaur token:
-  uuid: "1ab1d189-ff59-5430-a10d-6221a4842c9d"
-  tokenParts: [
-    "4960f41c-d50d-552c-a20e-79e7fe7e0566",  ← Horror's UUID
-    "1ab1d189-ff59-5430-a10d-6221a4842c9d"   ← Centaur's own UUID
-  ]
-
-Horror token:
-  uuid: "4960f41c-d50d-552c-a20e-79e7fe7e0566"
-  tokenParts: [
-    "4960f41c-d50d-552c-a20e-79e7fe7e0566",  ← Horror's own UUID
-    "1ab1d189-ff59-5430-a10d-6221a4842c9d"   ← Centaur's UUID
-  ]
-```
-
-Both faces list **each other** in their `tokenParts` arrays. This is the
-authoritative link between them.
-
-### The Current App Limitation
-
-Because the app uses Scryfall data as its source of truth, it has no way of
-knowing that Centaur and Horror are two faces of the same physical card. If a
-user imports their Centaur/Horror token it gets stored as either a Centaur OR a
-Horror — not both. If a deck needs Horror tokens and the user owns a
-Centaur/Horror double-faced token, the app cannot recognise that this card
-satisfies the Horror requirement.
-
----
-
-## The Solution
-
-### Core Approach
-
-We use MTGJson's `tokenParts` field as the source of truth to detect which
-tokens are faces of the same physical card. During the sync script pipeline
-(which already builds a `cardTokenParts` map from `tokenParts`), we derive a
-`relatedTokens` field and bake it into `light_index.json.gz`.
-
-The Flutter app then uses this `relatedTokens` field to:
-
-1. Treat double-faced tokens as a single card entry in the collection (one row,
-   one location, two faces)
-2. Display them as "Centaur // Horror" via a new `displayName` field
-3. Recognise that owning this card satisfies a deck requirement for EITHER face
-
-### Naming Convention
-
-When a double-faced token is detected, the two face names are **sorted
-alphabetically** and joined with ` // `. This ensures consistency regardless of
-which face was imported first. "Centaur // Horror" always, never
-"Horror // Centaur".
-
-This alphabetical rule applies **only to double-faced tokens** identified via
-`relatedTokens`. All other card types continue to use their existing logic.
-
-### How the Combined Name Is Stored
-
-The `Card` model has `name` declared as `final`. We do NOT change this.
-Instead, we add a new nullable field `displayName` to the `Card` model.
-
-- `name` continues to hold the original single-face name (e.g. "Centaur") and
-  is used for CSV matching, scryfallId lookups, and all internal logic
-- `displayName` holds the combined name (e.g. "Centaur // Horror") when the
-  card is a double-faced token, and is `null` for all other cards
-- All UI rendering uses `displayName ?? name` so regular cards are unaffected
-
-### Scope of Changes
-
-**We are NOT changing:**
-- How any existing card type works
-- The `name` field on `Card` (remains final)
-- The transform/modal DFC/adventure/split card logic
-- The token service ownership logic (name + P/T matching)
-- The CSV import format
-- `CardGroup.name` grouping logic — cards group by `name` not `displayName`,
-  which is correct (a "Centaur" and a "Horror" from different physical cards
-  should never be grouped together). Only the rendered label in the UI changes,
-  not the internal grouping key
-
-**We ARE adding:**
-- A `relatedTokens` field in `light_index.json` for affected tokens
-- A `displayName` nullable field on the `Card` model, database table, and mapper
-- Detection of `relatedTokens` during detail sync to populate back-face fields
-  and set `displayName`
-- Token service awareness of `displayName` when matching
-
----
-
-## Important Edge Cases
-
-### The Same Token Face Can Appear on Multiple Products
-
-The Horror token (1/1 black) appears in two different double-faced token
-products:
-- Product A: Horror / Centaur
-- Product B: Horror / Eldrazi Horror (3/2 colorless)
-
-These are two **different physical cards**. They are tracked separately in the
-collection. The `relatedTokens` field correctly handles this because each
-product's UUIDs form a distinct set.
-
-### One Physical Card Satisfies Only One Requirement At A Time
-
-If a deck needs both a Centaur token AND a Horror token simultaneously, the user
-cannot use the same physical Centaur/Horror card for both at once. This is
-handled naturally by the existing allocation logic — the card is one row with one
-`rowId`, so it can only be allocated once.
-
-### CSV Re-import After displayName Is Set
-
-After detail sync, `card.displayName` is "Centaur // Horror" but `card.name`
-remains "Centaur". If the user re-imports their CSV, the import creates cards
-with `name = "Centaur"`. The merge logic matches by `scryfallId` first, so the
-card is matched correctly and `displayName` will be re-populated at the next
-detail sync. No data loss.
-
-### `copyWithVersion()` and `displayName`
-
-`copyWithVersion()` currently nulls all detail fields when the user switches a
-card's version. `displayName` should be **preserved** through version changes —
-the double-faced nature of a token card does not change between printings. Add
-`displayName: displayName` to the `copyWithVersion()` return value (see
-Change 1 below).
-
----
-
-## Project 1: Sync Script Changes (`scripts/sync-scryfall.js`)
-
-### Key Insight: No Extra Iteration Needed
-
-`extractTokenParts()` already walks every MTGJson entry and builds
-`cardTokenParts[scryfallId]` = array of Scryfall IDs from that token's
-`tokenParts` field, including the token's own Scryfall ID.
-
-So for the Centaur token:
-```
-cardTokenParts["centaur_scryfall_id"] = ["horror_scryfall_id", "centaur_scryfall_id"]
-```
-
-To derive `relatedTokens`, we filter out the current card's own Scryfall ID.
-No separate function or extra iteration needed.
-
-### The One Change: Update `mergeLightIndex()`
-
-Replace the existing `mergeLightIndex()` function. The **function signature is
-unchanged** — no new parameters. The call site in `sync()` does not change.
+The current function flattens all tokenParts across all products into one Set.
+Replace the entire function with a version that builds BOTH the existing flat
+set (for relatedTokens) AND a new per-product pairs array (for tokenPairings).
 
 ```javascript
-/**
- * Merge Scryfall cards with MTGJson data and project to light index format.
- * Now also includes relatedTokens for double-faced token cards, derived
- * from the already-built cardTokenParts map.
- *
- * relatedTokens logic:
- * cardTokenParts[scryfallId] contains ALL faces of a double-faced token
- * (including the token itself). Filtering out the current scryfallId gives
- * the OTHER faces — these are the relatedTokens.
- * Single-faced tokens have no cardTokenParts entry, or their entry only
- * contains their own ID, so relatedTokens will be empty and not added.
- */
-function mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid = {}) {
-  console.log('🔀 Merging light index with tokenParts, relatedTokens, and projecting fields...');
+function extractTokenParts(mtgjsonCards, uuidToScryfallId) {
+  console.log('🎴 Extracting tokenParts from MTGJson (per-product pairs)...');
+
+  const cardTokenParts = {};     // unchanged — flat set for relatedTokens
+  const cardTokenPairings = {};  // new — per-product pairs for tokenPairings
+
+  for (const versions of Object.values(mtgjsonCards)) {
+    if (!Array.isArray(versions)) continue;
+
+    for (const card of versions) {
+      if (!card.uuid || !card.tokenProducts || !Array.isArray(card.tokenProducts)) continue;
+
+      const scryfallId = uuidToScryfallId[card.uuid];
+      if (!scryfallId) continue;
+
+      const allTokenScryfallIds = new Set();
+      const pairings = [];
+
+      for (const product of card.tokenProducts) {
+        if (!product.tokenParts || !Array.isArray(product.tokenParts)) continue;
+
+        const pair = [];
+        for (const tokenPart of product.tokenParts) {
+          const tokenUuid = tokenPart.uuid;
+          if (!tokenUuid) continue;
+          const tokenScryfallId = uuidToScryfallId[tokenUuid];
+          if (tokenScryfallId) {
+            pair.push(tokenScryfallId);
+            allTokenScryfallIds.add(tokenScryfallId);
+          }
+        }
+
+        // Only store pairs of exactly 2 (one physical double-faced token = 2 faces)
+        if (pair.length === 2) {
+          pairings.push(pair);
+        }
+      }
+
+      // Existing flat set — unchanged, used downstream for relatedTokens
+      if (allTokenScryfallIds.size > 0) {
+        cardTokenParts[scryfallId] = [...allTokenScryfallIds];
+      }
+
+      // New per-product pairings — only store if this card pairs with another card
+      if (pairings.length > 0) {
+        const hasOtherFace = pairings.some(pair => pair.some(id => id !== scryfallId));
+        if (hasOtherFace) {
+          cardTokenPairings[scryfallId] = pairings;
+        }
+      }
+    }
+  }
+
+  console.log(`✅ Extracted ${Object.keys(cardTokenParts).length} cards with tokenParts`);
+  console.log(`✅ Extracted ${Object.keys(cardTokenPairings).length} cards with tokenPairings`);
+
+  return { cardTokenParts, cardTokenPairings };
+}
+```
+
+---
+
+### Change 2 — Update `mergeLightIndex` signature and body
+
+Add `cardTokenPairings = {}` as a new third parameter (before `scryfallToUuid`).
+After the existing `relatedTokens` block, add the new `tokenPairings` block.
+The existing `relatedTokens` logic is completely unchanged.
+
+```javascript
+function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}) {
+  console.log('🔀 Merging light index with tokenParts, tokenPairings, relatedTokens, and projecting fields...');
   const merged = {};
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     const projected = projectLightCard(card);
     projected.mtgjsonUuid = scryfallToUuid[scryfallId] || null;
 
+    // EXISTING — unchanged
     if (cardTokenParts[scryfallId]) {
       projected.tokenParts = cardTokenParts[scryfallId];
-
-      // Derive relatedTokens: other faces of this double-faced token.
-      // cardTokenParts includes the token's own Scryfall ID, so filter it out.
       const relatedTokens = cardTokenParts[scryfallId].filter(id => id !== scryfallId);
       if (relatedTokens.length > 0) {
         projected.relatedTokens = relatedTokens;
       }
+    }
+
+    // NEW — only set if Scryfall did not already mark this as double_faced_token.
+    // We cannot use !projected.relatedTokens as the guard because Beast 18/19
+    // also get relatedTokens from the flat set above (they have tokenProducts),
+    // which would block tokenPairings from ever being set for them.
+    // Checking layout === 'double_faced_token' correctly targets only the cards
+    // Scryfall natively handles, leaving layout: 'token' cards like Beast 18/19
+    // to receive tokenPairings regardless of whether relatedTokens is also set.
+    if (cardTokenPairings[scryfallId] && projected.layout !== 'double_faced_token') {
+      projected.tokenPairings = cardTokenPairings[scryfallId];
+      projected.hasAlternativePairings = cardTokenPairings[scryfallId].length > 1;
     }
 
     merged[scryfallId] = projected;
@@ -230,461 +135,431 @@ function mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid = {}) {
   console.log(`✅ Merged and projected ${Object.keys(merged).length} cards`);
 
   const doubleFacedCount = Object.values(merged).filter(c => c.relatedTokens).length;
-  console.log(`   Double-faced token faces detected: ${doubleFacedCount}`);
+  const manualPairingCount = Object.values(merged).filter(c => c.tokenPairings).length;
+  console.log(`   Double-faced token faces (Scryfall layout): ${doubleFacedCount}`);
+  console.log(`   Manually paired token faces (MTGJson): ${manualPairingCount}`);
 
   return merged;
 }
 ```
 
-### Expected Output
+---
 
-```json
-{
-  "centaur_scryfall_id": {
-    "name": "Centaur",
-    "layout": "token",
-    "power": "3",
-    "toughness": "3",
-    "tokenParts": ["horror_scryfall_id", "centaur_scryfall_id"],
-    "relatedTokens": ["horror_scryfall_id"]
-  },
-  "horror_scryfall_id": {
-    "name": "Horror",
-    "layout": "token",
-    "power": "1",
-    "toughness": "1",
-    "tokenParts": ["horror_scryfall_id", "centaur_scryfall_id"],
-    "relatedTokens": ["centaur_scryfall_id"]
+### Change 3 — Update call site in `sync()`
+
+Find these two lines in `sync()`:
+
+```javascript
+// BEFORE
+const cardTokenParts = extractTokenParts(mtgjsonCards, uuidToScryfallId);
+const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, scryfallToUuid);
+
+// AFTER
+const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
+const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid);
+```
+
+---
+
+### Change 4 — Add debug verification (temporary, remove after confirming output)
+
+Add immediately after `lightIndex` is built in `sync()`:
+
+```javascript
+// DEBUG — verify Beast 18 and 19 are correctly paired
+const beast18 = lightIndex['06d59ee8-446e-427f-ac88-53f5fa378384'];
+const beast19 = lightIndex['50d90039-6e75-4c76-893d-cd1686a36be9'];
+console.log('🔍 Beast 18:', JSON.stringify({
+  relatedTokens: beast18?.relatedTokens,
+  tokenPairings: beast18?.tokenPairings,
+  hasAlternativePairings: beast18?.hasAlternativePairings
+}));
+console.log('🔍 Beast 19:', JSON.stringify({
+  relatedTokens: beast19?.relatedTokens,
+  tokenPairings: beast19?.tokenPairings,
+  hasAlternativePairings: beast19?.hasAlternativePairings
+}));
+// END DEBUG
+```
+
+Expected output:
+```
+Beast 18: { tokenPairings: [["06d59ee8...","50d90039..."]], hasAlternativePairings: false }
+Beast 19: { tokenPairings: [["06d59ee8...","50d90039..."],["50d90039...","8c4d495a..."]], hasAlternativePairings: true }
+```
+
+After confirming, remove the debug block and regenerate.
+
+---
+
+### Sync Script Summary
+- `extractTokenParts` — replaced
+- `mergeLightIndex` — signature updated, new block added after existing relatedTokens block
+- `sync()` call site — two lines updated
+- Everything else — unchanged
+
+---
+
+## Part 2 — Dart App
+
+### Change 5 — Card model (models.dart)
+
+Add two new fields to the `Card` class field declarations:
+
+```dart
+// Double-faced token manual pairing (MTGJson tokenPairings)
+String? tokenPairingBackFaceId;
+bool hasAlternativePairings;
+```
+
+Add to constructor parameters:
+
+```dart
+this.tokenPairingBackFaceId,
+this.hasAlternativePairings = false,
+```
+
+Add to `toJson()`:
+
+```dart
+'tokenPairingBackFaceId': tokenPairingBackFaceId,
+'hasAlternativePairings': hasAlternativePairings,
+```
+
+Add to `fromJson()`:
+
+```dart
+tokenPairingBackFaceId: j['tokenPairingBackFaceId'] as String?,
+hasAlternativePairings: j['hasAlternativePairings'] as bool? ?? false,
+```
+
+Add to `copyWith()` parameters:
+
+```dart
+String? tokenPairingBackFaceId,
+bool? hasAlternativePairings,
+```
+
+Add to `copyWith()` body:
+
+```dart
+tokenPairingBackFaceId: tokenPairingBackFaceId ?? this.tokenPairingBackFaceId,
+hasAlternativePairings: hasAlternativePairings ?? this.hasAlternativePairings,
+```
+
+Add to `copyWithVersion()` returned Card:
+
+```dart
+tokenPairingBackFaceId: null,
+hasAlternativePairings: false,
+```
+
+---
+
+### Change 6 — Drift database schema
+
+In the Drift cards table definition add two columns:
+
+```dart
+TextColumn get tokenPairingBackFaceId => text().nullable()();
+BoolColumn get hasAlternativePairings => boolean().withDefault(const Constant(false))();
+```
+
+Increment `schemaVersion` by 1.
+
+Add migration step:
+
+```dart
+from X to X+1: (m, schema) async {
+  await m.addColumn(schema.cards, schema.cards.tokenPairingBackFaceId);
+  await m.addColumn(schema.cards, schema.cards.hasAlternativePairings);
+},
+```
+
+Update the DAO `toCompanion` and `fromRow` methods to map both new fields.
+
+---
+
+### Change 7 — ScryfallService.extractCardDetails (scryfall_service.dart)
+
+After the existing `relatedTokens` block (the one that checks
+`cardData['relatedTokens']`), add a new block:
+
+```dart
+// Manually-paired double-faced tokens via MTGJson tokenPairings
+// Only runs if Scryfall did not already populate relatedTokens
+final tokenPairings = cardData['tokenPairings'] as List<dynamic>?;
+// Cannot guard on result['isDoubleSided'] because that may already be true
+// for unrelated reasons. Guard on layout instead — same logic as the JS side.
+if (tokenPairings != null &&
+    tokenPairings.isNotEmpty &&
+    cardData['layout'] != 'double_faced_token') {
+
+  // Default to first pairing, find the other face ID
+  final firstPairing = tokenPairings[0] as List<dynamic>;
+  String? backFaceId;
+  for (final id in firstPairing) {
+    if ((id as String) != scryfallId) {
+      backFaceId = id;
+      break;
+    }
+  }
+
+  if (backFaceId != null) {
+    final backFaceData = getCardData(backFaceId);
+    if (backFaceData != null) {
+      final backDetails = _extractFaceDetails(backFaceData);
+
+      result['isDoubleSided']          = true;
+      result['tokenPairingBackFaceId'] = backFaceId;
+      result['hasAlternativePairings'] = cardData['hasAlternativePairings'] as bool? ?? false;
+      result['backManaCost']           = backDetails['manaCost'];
+      result['backType']               = backDetails['type'];
+      result['backSubtype']            = backDetails['subtype'];
+      result['backColors']             = backDetails['colors'];
+      result['backPowerToughness']     = backDetails['powerToughness'];
+      result['backKeywords']           = backDetails['keywords'];
+      result['backCardText']           = backDetails['cardText'];
+      result['backFlavorText']         = backDetails['flavorText'];
+      result['backArtist']             = backDetails['artist'];
+
+      // Combined display name — alphabetically ordered
+      final thisName    = (cardData['name'] as String?) ?? '';
+      final backName    = (backFaceData['name'] as String?) ?? '';
+      final sortedNames = [thisName, backName]..sort();
+      result['combinedName'] = '${sortedNames[0]} // ${sortedNames[1]}';
+    }
   }
 }
 ```
 
 ---
 
-## Project 2: Flutter App Changes
+### Change 8 — CollectionService.updateCardDetailsFromScryfall (collection_service.dart)
 
-### Confirmed Existing Methods (do not need to be created)
+In the details population block, after the existing `combinedName` handling, add:
 
-- `getCardData(scryfallId)` — exists on `ScryfallService`, returns
-  `_cardIndex[scryfallId] as Map<String, dynamic>?`
-- `_extractFaceDetails(Map<String, dynamic>)` — exists on `ScryfallService`
-  as a private helper, returns a map with keys: `manaCost`, `type`, `subtype`,
-  `colors`, `powerToughness`, `keywords`, `cardText`, `flavorText`, `artist`
-
----
-
-### Change 1: Add `displayName` to the `Card` model
-
-**File**: `lib/models.dart`
-
-Add a new nullable non-final field `displayName` to the `Card` class. This is
-the ONLY change to the `Card` model's fields — `name` remains `final`.
-
-**In the field declarations**, add:
 ```dart
-String? displayName; // Combined name for double-faced tokens e.g. "Centaur // Horror"
-```
-
-**In the constructor**, add:
-```dart
-this.displayName,
-```
-
-**In `toJson()`**, add:
-```dart
-'displayName': displayName,
-```
-
-**In `fromJson()`**, add:
-```dart
-displayName: j['displayName'] as String?,
-```
-
-**In `copyWith()`**, add the parameter and assignment:
-```dart
-// Parameter:
-String? displayName,
-// In the returned Card:
-displayName: displayName ?? this.displayName,
-```
-
-**In `copyWithVersion()`**, preserve `displayName` explicitly. The
-double-faced nature of a token does not change between printings:
-```dart
-// Add to the Card(...) constructor call inside copyWithVersion():
-displayName: displayName,
+if (details.containsKey('tokenPairingBackFaceId')) {
+  card.tokenPairingBackFaceId = details['tokenPairingBackFaceId'] as String?;
+}
+if (details.containsKey('hasAlternativePairings')) {
+  card.hasAlternativePairings = details['hasAlternativePairings'] as bool? ?? false;
+}
 ```
 
 ---
 
-### Change 2: Add `displayName` to the Drift database layer
+### Change 9 — Add deduplication method to CollectionService (collection_service.dart)
 
-`displayName` must be persisted to the SQLite database, otherwise it is lost
-on app restart after detail sync.
-
-**File a: `lib/database/tables/cards_table.dart`**
-
-Add a new nullable text column:
-```dart
-TextColumn get displayName => text().nullable()();
-```
-
-**File b: `lib/database/mappers/card_mapper.dart`**
-
-In `fromRow()`, pass the new column value to the `Card` constructor:
-```dart
-displayName: row.displayName,
-```
-
-In `toCompanion()`, include the new field:
-```dart
-displayName: Value(card.displayName),
-```
-
-**File c: Regenerate Drift code**
-
-After modifying `cards_table.dart`, the Drift-generated file
-`lib/database/app_database.g.dart` must be regenerated. Run:
-
-```
-dart run build_runner build --delete-conflicting-outputs
-```
-
-This must be run before building or running the app. Do not manually edit
-`app_database.g.dart` — it is fully auto-generated.
-
----
-
-### Change 3: Update UI name rendering
-
-**What**: Everywhere the UI displays a card's name to the user, replace
-`card.name` with `card.displayName ?? card.name`. This means regular cards
-(where `displayName` is null) render exactly as before, and double-faced tokens
-render as "Centaur // Horror".
-
-**Do NOT change** `card.name` in logic code — only in UI rendering.
-
-**Files to update:**
-- `lib/widgets/collection/collection_table_view.dart` — both the collapsed group
-  row label AND the expanded individual card row cell
-- `lib/utils/column_cell_builder.dart` — the card name text widget
-
-**Collapsed group row (`collection_table_view.dart`)**: The collapsed row renders
-`group.name`, which comes from `card.name` (the final field). Since `card.name`
-is still "Centaur", the collapsed row would incorrectly show "Centaur" rather
-than "Centaur // Horror". Fix this by rendering:
+Add this new method to `CollectionService`:
 
 ```dart
-// Instead of:
-Text(group.name, ...)
+/// After import and detail sync, find manually-paired double-faced tokens
+/// where both faces were imported as separate cards and merge them.
+/// Canonical face = alphabetically first name. The other face is removed.
+/// Quantity stays the same — 1 physical card = 1 row regardless of faces.
+List<Card> deduplicateManuallyPairedTokens(List<Card> collection) {
+  final scryfallIndex = <String, Card>{
+    for (final c in collection) c.scryfallId: c
+  };
 
-// Use:
-Text(group.versions.first.displayName ?? group.name, ...)
-```
+  final toRemove = <String>{};
+  final result   = <Card>[];
 
-This mirrors how regular double-faced cards (transform, modal DFC) display their
-full name in the collapsed row. The `group.versions.first` card is always
-available since a group always has at least one version.
+  for (final card in collection) {
+    if (toRemove.contains(card.scryfallId)) continue;
 
-**Expanded individual rows**: These render through `column_cell_builder.dart`.
-Search for `card.name` rendered inside a `Text()` widget and replace with
-`card.displayName ?? card.name`.
+    final backFaceId = card.tokenPairingBackFaceId;
+    if (backFaceId == null) {
+      result.add(card);
+      continue;
+    }
 
-**Logic usages of `card.name` and `group.name`** (comparisons, keys, lookups,
-sorting) must be left unchanged.
+    final backFaceCard = scryfallIndex[backFaceId];
+    if (backFaceCard == null) {
+      // Other face not in collection — keep as single-faced for now
+      result.add(card);
+      continue;
+    }
 
-**Note on `tokens_modal.dart`**: This file displays token names in the required
-tokens list. Check whether it renders `token.name` directly — if so, apply the
-same pattern using the `TokenEntry.name` field (which is populated from the
-light index's `name` field, i.e. the single-face name). Double-faced tokens in
-the required tokens list show only the front face name by design, since the
-`TokenEntry` is created per-face from `all_parts` data.
+    if (toRemove.contains(backFaceId)) {
+      // Already handled as part of another pair
+      result.add(card);
+      continue;
+    }
 
----
+    // Both faces present — canonical = alphabetically first name.
+    // When names are identical (e.g. Beast // Beast), use collector number
+    // as tiebreaker — lower number = front face = canonical.
+    final bool thisCardIsCanonical;
+    if (card.name != backFaceCard.name) {
+      thisCardIsCanonical = card.name.compareTo(backFaceCard.name) < 0;
+    } else {
+      final thisNumber = int.tryParse(card.collectorNumber) ?? 0;
+      final backNumber = int.tryParse(backFaceCard.collectorNumber) ?? 0;
+      thisCardIsCanonical = thisNumber < backNumber;
+    }
 
-### Change 4: `ScryfallService.extractCardDetails()`
-
-**File**: `lib/services/scryfall_service.dart`
-
-**What**: When `extractCardDetails()` is called for a token that has
-`relatedTokens` in the light index, populate the back-face fields from the
-related token's data and build the combined `displayName`.
-
-**Important notes:**
-- The existing code already sets `isDoubleSided = true` for `double_faced_token`
-  layout. Do NOT set it again in our new block — it is already handled.
-- The existing code tries to populate back-face fields from `card_faces[1]`.
-  For double-faced tokens as Scryfall represents them, `card_faces` is empty on
-  each face (each face is a separate Scryfall card). So those fields are null
-  after the existing block runs. Our new block then correctly populates them
-  from the related token's light index entry. This overwrite is intentional.
-
-**Where**: Add immediately before `return result`, after all other result-building
-code:
-
-```dart
-// ── Double-faced token detection ──────────────────────────────────────────
-// If this card has relatedTokens in the light index, it is one face of a
-// double-faced token card (e.g. Centaur // Horror).
-//
-// Note: isDoubleSided is already set to true above for double_faced_token
-// layout — we do not set it again here.
-//
-// The existing card_faces[1] back-face population above produces null values
-// for these cards (Scryfall stores each face as an independent card with no
-// card_faces array). Our block below correctly populates those fields from
-// the related token's light index entry. This is intentional.
-final relatedTokens = cardData['relatedTokens'] as List<dynamic>?;
-if (relatedTokens != null && relatedTokens.isNotEmpty) {
-  final relatedScryfallId = relatedTokens.first as String;
-  final relatedData = getCardData(relatedScryfallId);
-
-  if (relatedData != null) {
-    // _extractFaceDetails() is an existing private method on ScryfallService.
-    // It returns: manaCost, type, subtype, colors, powerToughness, keywords,
-    // cardText, flavorText, artist.
-    final backDetails = _extractFaceDetails(relatedData);
-
-    result['backManaCost']       = backDetails['manaCost'];
-    result['backType']           = backDetails['type'];
-    result['backSubtype']        = backDetails['subtype'];
-    result['backColors']         = backDetails['colors'];
-    result['backPowerToughness'] = backDetails['powerToughness'];
-    result['backKeywords']       = backDetails['keywords'];
-    result['backCardText']       = backDetails['cardText'];
-    result['backFlavorText']     = backDetails['flavorText'];
-    result['backArtist']         = backDetails['artist'];
-
-    // Build the combined display name sorted alphabetically.
-    // "Centaur" + "Horror" → "Centaur // Horror" always.
-    final thisName    = cardData['name'] as String? ?? '';
-    final relatedName = relatedData['name'] as String? ?? '';
-    final sortedNames = [thisName, relatedName]..sort();
-    result['combinedName'] = '${sortedNames[0]} // ${sortedNames[1]}';
+    if (thisCardIsCanonical) {
+      toRemove.add(backFaceId);
+      result.add(card);
+    } else {
+      // Back face card is canonical — this card gets removed
+      // The canonical card will be added when the loop reaches it
+      toRemove.add(card.scryfallId);
+    }
   }
+
+  debugPrint('🔀 Deduplicated ${toRemove.length} manually-paired token faces');
+  return result;
 }
 ```
 
 ---
 
-### Change 5: `CollectionService.updateCardDetailsFromScryfall()`
+### Change 10 — Call deduplication after import and detail sync
 
-**File**: `lib/services/collection_service.dart`
-
-**What**: Map `combinedName` from `extractCardDetails()` onto `card.displayName`.
-
-**Where**: Inside the `for (final card in collection)` loop, after the existing
-field mapping block:
+Find wherever `updateCardDetailsFromScryfall` is called after a CSV import
+and add the deduplication call immediately after, then persist:
 
 ```dart
-// Double-faced token: set displayName to the combined alphabetical name.
-// card.name remains unchanged (it is final) and is used for all internal
-// logic. Only UI rendering uses displayName.
-if (details.containsKey('combinedName') && details['combinedName'] != null) {
-  card.displayName = details['combinedName'] as String;
-}
+await collectionService.updateCardDetailsFromScryfall(collection);
+
+// Merge manually-paired double-faced token faces into single entries
+collection = collectionService.deduplicateManuallyPairedTokens(collection);
+
+await db.cardsDao.upsertCards(collection);
 ```
 
 ---
 
-### Change 6: Image sync in `ScryfallService.downloadAndSaveImage()`
+### Change 11 — ScryfallService.downloadAndSaveImage (scryfall_service.dart)
 
-**File**: `lib/services/scryfall_service.dart`
+Find the back image download section. It currently has two blocks:
+1. `relatedTokenIds` block (double_faced_token via Scryfall)
+2. `card_faces` block (transform/modal_dfc)
 
-**What**: Download the related token's image as the back image when a card has
-`relatedTokens`. Uses the existing `<scryfallId>_back.jpg` convention so the
-existing `collection_sync_mixin.dart` back image population works automatically.
-
-**Important**: Check `relatedTokens` FIRST, before the existing `card_faces[1]`
-back image block. Wrap the existing `card_faces` block in `else` so it only runs
-for regular DFC cards. This avoids the `card_faces` block failing silently and
-being overwritten.
-
-**Where**: After the front image is saved, restructure the back image section:
+Add a new block between them for manually-paired tokens:
 
 ```dart
-// Back image: check for double-faced tokens first (relatedTokens),
-// then fall back to the regular card_faces approach for transform/modal DFC.
-final relatedTokenIds = cardData['relatedTokens'] as List<dynamic>?;
-if (relatedTokenIds != null && relatedTokenIds.isNotEmpty) {
-  // Double-faced token: download the related token's image as the back image.
-  final relatedScryfallId = relatedTokenIds.first as String;
-  final relatedData = getCardData(relatedScryfallId);
+// Manually-paired double-faced tokens (tokenPairingBackFaceId from MTGJson)
+final tokenPairingBackFaceId =
+    cardData['tokenPairingBackFaceId'] as String?;
 
-  if (relatedData != null) {
-    final relatedImageUris =
-        relatedData['image_uris'] as Map<String, dynamic>?;
-    final relatedImageUrl = relatedImageUris?['normal'] as String?;
+// Guard on layout, not relatedTokenIds — Beast 18/19 have relatedTokens set
+// from the flat tokenParts data so relatedTokenIds would be non-null for them,
+// which would incorrectly skip this block. layout: 'double_faced_token' cards
+// are already handled by the relatedTokenIds block above.
+if (tokenPairingBackFaceId != null && cardData['layout'] != 'double_faced_token') {
+  final backFaceData = getCardData(tokenPairingBackFaceId);
 
-    if (relatedImageUrl != null) {
+  if (backFaceData != null) {
+    final backImageUris =
+        backFaceData['image_uris'] as Map<String, dynamic>?;
+    final backImageUrl = backImageUris?['normal'] as String?;
+
+    if (backImageUrl != null) {
       try {
         final backResponse = await http
-            .get(Uri.parse(relatedImageUrl))
+            .get(Uri.parse(backImageUrl))
             .timeout(const Duration(seconds: 15));
 
         if (backResponse.statusCode == 200) {
+          final thisName = cardData['name'] as String? ?? '';
+          final backName = backFaceData['name'] as String? ?? '';
+
+          // Determine which face is canonical (alphabetically first name).
+          // When names are identical (e.g. Beast // Beast), fall back to
+          // collector number so the lower-numbered card is always the front.
+          // This matches physical reality — Beast #18 is the front, Beast #19 is the back.
+          final bool isAlphabeticallySecond;
+          if (thisName != backName) {
+            isAlphabeticallySecond = thisName.compareTo(backName) > 0;
+          } else {
+            final thisNumber = int.tryParse(cardData['collector_number'] as String? ?? '') ?? 0;
+            final backNumber = int.tryParse(backFaceData['collector_number'] as String? ?? '') ?? 0;
+            isAlphabeticallySecond = thisNumber > backNumber;
+          }
+
           final backImageFile =
               File('${_imageDir!.path}/${scryfallId}_back.jpg');
-          await backImageFile.writeAsBytes(backResponse.bodyBytes);
+
+          if (isAlphabeticallySecond) {
+            // This card's image goes to back; back face image goes to front
+            await imageFile.rename(backImageFile.path);
+            await imageFile.writeAsBytes(backResponse.bodyBytes);
+          } else {
+            // This card is front; save back face as back image
+            await backImageFile.writeAsBytes(backResponse.bodyBytes);
+          }
         }
       } catch (e) {
         await _log(
-            '⚠  Double-faced token back image download failed for $scryfallId: $e');
+            '⚠  tokenPairing back image download failed for $scryfallId: $e');
       }
     }
   }
-} else {
-  // Regular DFC (transform, modal_dfc, etc.): use the existing card_faces
-  // approach. KEEP THE EXISTING card_faces BACK IMAGE DOWNLOAD CODE HERE.
-  // Do not delete it — move it into this else block.
 }
 ```
 
 ---
 
-### Change 7: `TokenService.getRequiredTokens()`
+### Change 12 — Verify CardFaceData (utils/card_face_data.dart)
 
-**File**: `lib/services/token_service.dart`
-
-Two sub-changes.
-
-#### 7a: Prevent both faces appearing as separate token entries
-
-Add `final processedTokenIds = <String>{};` immediately before the
-`for (final dc in deckCards)` loop.
-
-Inside the `for (final part in allParts)` loop, after the self-reference check
-(`if (tokenId == dc.scryfallId) continue;`), add:
+Open `card_face_data.dart` and check `CardFaceData.fromCard`. If it has any
+guards like:
 
 ```dart
-// Skip if already processed as the related face of a double-faced token.
-if (processedTokenIds.contains(tokenId)) continue;
-
-// Look up token data and mark this token and all its related faces as
-// processed so we don't add a duplicate entry for the other face.
-final tokenData = _scryfallService.getCardData(tokenId);
-final relatedIds = (tokenData?['relatedTokens'] as List<dynamic>? ?? [])
-    .map((id) => id as String)
-    .toList();
-processedTokenIds.add(tokenId);
-processedTokenIds.addAll(relatedIds);
+if (card.layout == 'double_faced_token' || card.layout == 'transform' ...) {
 ```
 
-Remove the separate `final tokenData = _scryfallService.getCardData(tokenId);`
-line that already exists below this point — it is now declared above.
-
-#### 7b: Match ownership by checking both faces via `displayName`
-
-Replace the existing `_countOwnedByNamePt()` with:
-
-```dart
-int _countOwnedByNamePt(String name, String? powerToughness) {
-  return _collection.cards.where((c) {
-    // Direct name match (all regular cards and tokens)
-    final nameMatches = c.name == name ||
-        // Double-faced token: displayName is "Centaur // Horror".
-        // Match if either face name matches the searched name.
-        (c.displayName != null &&
-            c.displayName!.contains(' // ') &&
-            c.displayName!.split(' // ').any((part) => part.trim() == name));
-
-    if (!nameMatches) return false;
-
-    if (powerToughness != null && c.powerToughness != powerToughness) {
-      return false;
-    }
-    return true;
-  }).length;
-}
-```
-
-`_buildNameAllocationMap()` does **not** need to change. It builds keys from
-the light index's individual face names via `scryfallId` lookups (e.g.
-"Centaur"), which already match the keys used in `getRequiredTokens()` lookups.
+Add `|| card.tokenPairingBackFaceId != null` to each such condition so manually-
+paired tokens also get back face data populated. If there are no layout guards
+and it reads directly from `card.isDoubleSided` and `card.backImagePath`, no
+changes are needed.
 
 ---
 
-## Summary of All File Changes
+### Change 13 — Verify _ensureAlphabeticalFaceOrder (collection_service.dart)
 
-### Sync Script (Project 1)
-
-| File | Change |
-|------|--------|
-| `scripts/sync-scryfall.js` | Update `mergeLightIndex()` to derive and add `relatedTokens` field |
-
-One function updated. No new functions. No signature changes. No extra
-iterations. Call site unchanged.
-
-### Flutter App (Project 2)
-
-| File | Change |
-|------|--------|
-| `lib/models.dart` | Add nullable `displayName` field; update constructor, `toJson`, `fromJson`, `copyWith`, `copyWithVersion` |
-| `lib/database/tables/cards_table.dart` | Add nullable `displayName` text column |
-| `lib/database/mappers/card_mapper.dart` | Map `displayName` in `fromRow()` and `toCompanion()` |
-| `lib/database/app_database.g.dart` | **Auto-generated** — run `dart run build_runner build --delete-conflicting-outputs` after updating the table |
-| `lib/services/scryfall_service.dart` | Add double-faced token block at end of `extractCardDetails()` |
-| `lib/services/scryfall_service.dart` | Restructure back image download in `downloadAndSaveImage()` |
-| `lib/services/collection_service.dart` | Map `combinedName` onto `card.displayName` in `updateCardDetailsFromScryfall()` |
-| `lib/services/token_service.dart` | Add `processedTokenIds` tracking in `getRequiredTokens()` |
-| `lib/services/token_service.dart` | Update `_countOwnedByNamePt()` to check `displayName` faces |
-| `lib/widgets/collection/collection_table_view.dart` | Render `card.displayName ?? card.name` in name column |
-| `lib/utils/column_cell_builder.dart` | Render `card.displayName ?? card.name` in name cell |
+Open `_ensureAlphabeticalFaceOrder`. It checks `details.containsKey('combinedName')`.
+Since Change 7 sets `combinedName` for manually-paired tokens too, this method
+will correctly swap front/back data when the imported card is the alphabetically-
+second face. No code changes needed — just verify the call is not skipped for
+cards with `tokenPairingBackFaceId`.
 
 ---
 
-## Deployment Order
+## Execution Order
 
-1. Update `scripts/sync-scryfall.js` and run it to regenerate
-   `light_index.json.gz` with `relatedTokens` fields
-2. Deploy the new `light_index.json.gz` to the server
-3. In the Flutter project, make all code changes
-4. Run `dart run build_runner build --delete-conflicting-outputs`
-5. Build and release the updated Flutter app
-6. Users sync their data — `updateCardDetailsFromScryfall()` will populate
-   `displayName` and back-face fields on any existing double-faced token entries
+Execute in this exact order to avoid dependency issues:
+
+1. **Sync script** — make Changes 1, 2, 3, 4
+2. **Run sync script** — regenerate `light_index.json.gz`, confirm debug output
+3. **Remove debug block** (Change 4), commit and push updated index to GitHub
+4. **Dart: Card model** — Change 5
+5. **Dart: DB schema** — Change 6
+6. **Dart: extractCardDetails** — Change 7
+7. **Dart: updateCardDetailsFromScryfall** — Change 8
+8. **Dart: deduplicateManuallyPairedTokens** — Change 9
+9. **Dart: call deduplication after import** — Change 10
+10. **Dart: downloadAndSaveImage** — Change 11
+11. **Dart: verify CardFaceData** — Change 12
+12. **Dart: verify _ensureAlphabeticalFaceOrder** — Change 13
+13. Wipe local app data and collection DB
+14. Build and run app, force sync to pull updated light index
+15. Import CSV containing Beast 18, Beast 19, Elephant 20 from CMR
 
 ---
 
-## Testing Checklist
+## Success Criteria
 
-### Sync Script
-- [ ] `light_index.json.gz` contains `relatedTokens: ["horror_scryfall_id"]`
-      on the Centaur token entry
-- [ ] `light_index.json.gz` contains `relatedTokens: ["centaur_scryfall_id"]`
-      on the Horror token entry
-- [ ] Single-faced tokens have NO `relatedTokens` field
-- [ ] Non-token cards have NO `relatedTokens` field
-- [ ] Console log reports the number of double-faced token faces detected
-
-### Flutter App — Collection
-- [ ] After detail sync, `card.displayName` is "Centaur // Horror"
-- [ ] After detail sync, `card.name` is still "Centaur" (unchanged, final)
-- [ ] Collection table renders "Centaur // Horror" for the card
-- [ ] `isDoubleSided` is true and flip button appears in card detail dialog
-- [ ] Back face shows Horror data (type, P/T, card text, artist)
-- [ ] Back image is downloaded and `backImagePath` is populated
-- [ ] Location tracking still works — one row, one location
-- [ ] `displayName` persists after app restart (confirms database layer works)
-- [ ] Re-importing CSV does not break anything — scryfallId match still works
-- [ ] Changing card version via `copyWithVersion()` preserves `displayName`
-
-### Flutter App — Token Service
-- [ ] A deck needing a Centaur token finds the card and shows correct status
-- [ ] A deck needing a Horror token finds the card and shows correct status
-- [ ] Only ONE token entry appears per physical card in the required tokens list
-- [ ] If user owns Horror/Eldrazi Horror AND Centaur/Horror, both appear as
-      separate entries
-- [ ] A deck needing both Centaur AND Horror tokens shows the card can only
-      satisfy one requirement at a time (allocation logic handles this)
-
-### Regression — must not be affected
-- [ ] Regular transform cards still work normally
-- [ ] Modal DFC cards (e.g. Pathway lands) still work normally
-- [ ] Adventure cards still work normally
-- [ ] Split cards still work normally
-- [ ] Single-faced tokens still work normally
-- [ ] CSV import still works normally
-- [ ] All cards that are not double-faced tokens have `displayName == null`
-      and render their `name` as before — no visual change for normal cards
-- [ ] `CardGroup` grouping is unaffected — groups still use `card.name`
+| Test | Expected Result |
+|------|----------------|
+| Beast 18 + Beast 19 imported together | One entry, displayName "Beast // Beast", front = 3/3 Jesper Ejsing, back = 4/4 Steve Prescott |
+| Beast 19 imported alone | Single entry, back face = Beast 18, `hasAlternativePairings = true` |
+| Elephant 20 imported alone | Single entry, back face = Beast 19 (first pairing), `hasAlternativePairings = true` |
+| Flip button in CardDetailsDialog | Appears and works for all above cases |
+| Existing layout: double_faced_token cards | Completely unaffected |
+| Regular single-faced tokens | Completely unaffected |
