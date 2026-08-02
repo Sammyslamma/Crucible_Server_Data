@@ -30,7 +30,12 @@ const CLEANUP_PRICES_TEMP = 1;       // prices_temp.json
  */
 async function getScryfallDownloadUrl() {
   console.log('📋 Fetching Scryfall metadata...');
-  const response = await fetch('https://api.scryfall.com/bulk-data');
+  const response = await fetch('https://api.scryfall.com/bulk-data', {
+    headers: {
+      'User-Agent': 'CrucibleMTG/1.0',
+      'Accept': 'application/json'
+    }
+  });
   if (!response.ok) {
     throw new Error(`Failed to fetch Scryfall metadata: ${response.status}`);
   }
@@ -59,7 +64,8 @@ async function downloadFile(url, outputPath, name) {
     const response = await fetch(url, {
       timeout: 600000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'CrucibleMTG/1.0',
+        'Accept': 'application/json'
       }
     });
 
