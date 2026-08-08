@@ -1,0 +1,25 @@
+{
+  "version": "2026-08-08",
+  "generatedAt": "2026-08-08T15:26:36.529Z",
+  "lightIndexCards": 116694,
+  "pricesCards": 103451,
+  "pricesTotal": 111115,
+  "vendorFiles": {
+    "tcgplayer": {
+      "size": 4708092,
+      "cards": 97310
+    },
+    "cardkingdom": {
+      "size": 4430016,
+      "cards": 95249
+    },
+    "cardmarket": {
+      "size": 4790971,
+      "cards": 98551
+    },
+    "manapool": {
+      "size": 4748378,
+      "cards": 99381
+    }
+  }
+}
