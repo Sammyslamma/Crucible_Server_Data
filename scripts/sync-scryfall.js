@@ -1,7 +1,6 @@
 import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
-import { createHash } from 'crypto';
 import { createReadStream, createWriteStream } from 'fs';
 import zlib from 'zlib';
 import JSONStream from 'JSONStream';
@@ -17,6 +16,10 @@ const PRICE_CONFIG = {
   includeBuylist: false,                   // Set true to include buylist prices
   includeEmptyObjects: false               // Set true to keep empty buylist/retail objects
 };
+
+// Marketplace purchase links we actually surface. CardHoarder (MTGO) and any
+// other non-paper vendors are intentionally excluded from the light index.
+const PURCHASE_VENDORS = ['tcgplayer', 'cardmarket', 'cardkingdom'];
 
 // Temp file cleanup: set to 1 to delete, 0 to keep (for data extraction)
 const CLEANUP_SCRYFALL_GZ = 1;       // scryfall.jsonl.gz
@@ -296,20 +299,6 @@ async function convertPricesToNdjson(inputPath, outputPath) {
 }
 
 /**
- * Calculate SHA256 hash of a file
- */
-function calculateHash(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('sha256');
-    const stream = createReadStream(filePath);
-
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('end', () => resolve(hash.digest('hex')));
-    stream.on('error', reject);
-  });
-}
-
-/**
  * Stream parse NDJSON file (one object per line)
  */
 async function loadNdjson(filePath, name) {
@@ -527,20 +516,13 @@ function projectLightCard(card) {
     return Object.keys(out).length > 0 ? out : null;
   };
 
-  const copyPrices = (src) => {
-    if (!src || typeof src !== 'object') return null;
-    const out = {};
-    for (const [k, v] of Object.entries(src)) {
-      if (k !== 'tix') out[k] = v;
-    }
-    return Object.keys(out).length > 0 ? out : null;
-  };
-
   const copyPurchaseUris = (src) => {
     if (!src || typeof src !== 'object') return null;
     const out = {};
     for (const [k, v] of Object.entries(src)) {
-      if (k !== 'cardhoarder') out[k] = v;
+      // Only surface the paper-marketplace links we actually use;
+      // CardHoarder and any other vendor are dropped.
+      if (PURCHASE_VENDORS.includes(k) && typeof v === 'string' && v) out[k] = v;
     }
     return Object.keys(out).length > 0 ? out : null;
   };
@@ -585,6 +567,7 @@ function projectLightCard(card) {
     artist: card.artist || null,
     produced_mana: card.produced_mana || null,
     all_parts: card.all_parts || null,
+    purchaseUris: copyPurchaseUris(card.purchase_uris),
     // Fields for name search and Card construction
     name: card.name || null,
     set: card.set || null,
@@ -649,30 +632,6 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
   console.log(`   Manually paired token faces (MTGJson): ${manualPairingCount}`);
 
   return merged;
-}
-
-/**
- * Extract prices and match against Scryfall
- */
-function extractPrices(priceData, scryfallCards) {
-  console.log('💰 Extracting prices...');
-  const prices = {};
-
-  for (const [scryfallId, card] of Object.entries(scryfallCards)) {
-    if (!priceData[scryfallId]) continue;
-
-    const priceEntry = priceData[scryfallId];
-    prices[scryfallId] = {
-      name: card.name,
-      set: card.set,
-      collectorNumber: card.collector_number,
-      prices: priceEntry.prices || {},
-      purchaseUris: priceEntry.purchaseUris || {},
-    };
-  }
-
-  console.log(`✅ Extracted prices for ${Object.keys(prices).length} cards`);
-  return prices;
 }
 
 /**
