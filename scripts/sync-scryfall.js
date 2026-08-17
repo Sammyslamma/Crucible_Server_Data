@@ -21,12 +21,29 @@ const PRICE_CONFIG = {
 // other non-paper vendors are intentionally excluded from the light index.
 const PURCHASE_VENDORS = ['tcgplayer', 'cardmarket', 'cardkingdom'];
 
+// ManaPool purchase-link source (public API, verified no auth required).
+// Supplies a direct buy URL only for cards currently in stock at ManaPool;
+// prices remain MTGJson-sourced for conformity with the other stores.
+const MANAPOOL_ENABLED = 1;                        // Set 0 to skip the ManaPool step
+const MANAPOOL_PRICES_URL = 'https://manapool.com/api/v1/prices/singles';
+
+// Per-vendor homepage fallbacks for the client, written into manifest.json.
+// The app opens these when a direct purchase link is unavailable, so users
+// never land on a 404 page.
+const STORE_HOME_URLS = {
+  tcgplayer: 'https://www.tcgplayer.com',
+  cardmarket: 'https://www.cardmarket.com',
+  cardkingdom: 'https://www.cardkingdom.com',
+  manapool: 'https://manapool.com',
+};
+
 // Temp file cleanup: set to 1 to delete, 0 to keep (for data extraction)
 const CLEANUP_SCRYFALL_GZ = 1;       // scryfall.jsonl.gz
 const CLEANUP_SCRYFALL_NDJSON = 1;   // scryfall.ndjson
 const CLEANUP_MTGJSON_TEMP = 1;      // mtgjson_temp.json
 const CLEANUP_MTGJSON_NDJSON = 0;    // mtgjson.ndjson
 const CLEANUP_PRICES_TEMP = 1;       // prices_temp.json
+const CLEANUP_MANAPOOL_TEMP = 1;     // manapool_temp.json
 
 /**
  * Fetch the actual Scryfall download URL from metadata
@@ -105,6 +122,52 @@ async function downloadFile(url, outputPath, name) {
   } catch (error) {
     throw new Error(`Failed to download ${name}: ${error.message}`);
   }
+}
+
+/**
+ * Fetch ManaPool singles catalog (public API, no key required) and build a
+ * scryfall_id -> direct purchase URL map for cards currently in stock.
+ * Prices stay MTGJson-sourced; this only supplies the missing ManaPool link.
+ * The API payload is streamed and parsed in chunks to avoid loading it whole.
+ */
+async function fetchManapoolSingles(outputPath) {
+  if (!MANAPOOL_ENABLED) {
+    console.log('⏭️  ManaPool disabled — skipping');
+    return {};
+  }
+
+  await downloadFile(MANAPOOL_PRICES_URL, outputPath, 'ManaPool');
+
+  console.log('💠 Extracting ManaPool purchase URLs...');
+  const manapoolByScryfallId = {};
+
+  return new Promise((resolve, reject) => {
+    const input = createReadStream(outputPath, { encoding: 'utf8' });
+    // ManaPool's `data` is an ARRAY of listing objects; `true` emits each element.
+    const pipeline = input.pipe(JSONStream.parse(['data', true]));
+    let count = 0;
+
+    pipeline.on('data', (listing) => {
+      try {
+        if (!listing || typeof listing !== 'object') return;
+        const scryfallId = listing.scryfall_id;
+        const url = listing.url;
+        if (scryfallId && typeof url === 'string' && url) {
+          manapoolByScryfallId[scryfallId] = url;
+          count++;
+        }
+      } catch (err) {
+        console.error(`Error parsing ManaPool listing: ${err.message}`);
+      }
+    });
+
+    pipeline.on('end', () => {
+      console.log(`✅ Mapped ${count} in-stock ManaPool cards to purchase URLs`);
+      resolve(manapoolByScryfallId);
+    });
+
+    pipeline.on('error', reject);
+  });
 }
 
 /**
@@ -589,13 +652,23 @@ function projectLightCard(card) {
  * Single-faced tokens have no cardTokenParts entry, or their entry only
  * contains their own ID, so relatedTokens will be empty and not added.
  */
-function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}) {
+function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}, manapoolByScryfallId = {}) {
   console.log('🔀 Merging light index with tokenParts, tokenPairings, relatedTokens, and projecting fields...');
   const merged = {};
 
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     const projected = projectLightCard(card);
     projected.mtgjsonUuid = scryfallToUuid[scryfallId] || null;
+
+    // ManaPool direct purchase URL — present only when the card is currently
+    // in stock at ManaPool (public API). Otherwise no ManaPool link exists in
+    // any source; the app constructs a best-effort card URL and falls back to
+    // the store homepage via manifest storeHomeUrls.
+    const manapoolUrl = manapoolByScryfallId[scryfallId];
+    if (manapoolUrl) {
+      projected.purchaseUris = projected.purchaseUris || {};
+      projected.purchaseUris.manapool = manapoolUrl;
+    }
 
     // EXISTING — unchanged
     if (cardTokenParts[scryfallId]) {
@@ -628,8 +701,12 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
 
   const doubleFacedCount = Object.values(merged).filter(c => c.relatedTokens).length;
   const manualPairingCount = Object.values(merged).filter(c => c.tokenPairings).length;
+  const manapoolLinked = Object.values(merged).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
   console.log(`   Double-faced token faces (Scryfall layout): ${doubleFacedCount}`);
   console.log(`   Manually paired token faces (MTGJson): ${manualPairingCount}`);
+  if (manapoolLinked > 0) {
+    console.log(`   ManaPool purchase URLs linked: ${manapoolLinked}`);
+  }
 
   return merged;
 }
@@ -770,6 +847,7 @@ async function sync() {
     const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const mtgjsonNdjsonPath = path.join(OUTPUT_DIR, 'mtgjson.ndjson');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
+    const manapoolPath = path.join(OUTPUT_DIR, 'manapool_temp.json');
 
     // Download Scryfall (.jsonl.gz - gzipped NDJSON)
     if (!fs.existsSync(scryfallGzPath)) {
@@ -825,9 +903,23 @@ async function sync() {
       }
     }
 
+    // Fetch ManaPool purchase URLs (public API, no key). Direct links only for
+    // cards currently in stock; failures here must not abort the whole sync.
+    let manapoolByScryfallId = {};
+    if (MANAPOOL_ENABLED) {
+      try {
+        manapoolByScryfallId = await fetchManapoolSingles(manapoolPath);
+      } catch (err) {
+        console.error(`⚠️ ManaPool fetch failed (${err.message}) — continuing without ManaPool purchase URLs`);
+        manapoolByScryfallId = {};
+      }
+    } else {
+      console.log('⏭️  ManaPool disabled — skipping');
+    }
+
     // Build light index with token parts and UUID
     const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
-    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid);
+    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId);
 
 
     // Download prices
@@ -874,12 +966,19 @@ async function sync() {
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
 
+    const manapoolLinked = Object.values(lightIndex).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
+
     const manifest = {
       version,
       generatedAt: timestamp,
       lightIndexCards: Object.keys(lightIndex).length,
       pricesCards: Object.keys(extractedPrices).length,
       pricesTotal: Object.keys(priceData).length,
+      storeHomeUrls: STORE_HOME_URLS,
+      manapool: {
+        inStockFromApi: Object.keys(manapoolByScryfallId).length,
+        linkedInLightIndex: manapoolLinked,
+      },
       vendorFiles: Object.fromEntries(
         Object.entries(vendorFiles).map(([v, f]) => [v, { size: f.size, cards: f.cards }])
       ),
@@ -895,6 +994,7 @@ async function sync() {
       { path: mtgjsonPath, name: 'mtgjson_temp.json', flag: CLEANUP_MTGJSON_TEMP },
       { path: mtgjsonNdjsonPath, name: 'mtgjson.ndjson', flag: CLEANUP_MTGJSON_NDJSON },
       { path: pricesPath, name: 'prices_temp.json', flag: CLEANUP_PRICES_TEMP },
+      { path: manapoolPath, name: 'manapool_temp.json', flag: CLEANUP_MANAPOOL_TEMP },
     ];
     for (const file of tempFiles) {
       if (!file.flag) {
@@ -922,6 +1022,7 @@ async function sync() {
     console.log(`   - Cards in light_index: ${Object.keys(lightIndex).length}`);
     console.log(`   - Cards in light_price_index: ${Object.keys(extractedPrices).length}`);
     console.log(`   - Total price entries available: ${Object.keys(priceData).length}`);
+    console.log(`   - ManaPool purchase URLs: ${manapoolLinked} cards linked (${Object.keys(manapoolByScryfallId).length} in stock from API)`);
     console.log(`   - Vendor files: ${Object.keys(vendorFiles).map(v => `${v} (${vendorFiles[v].cards} cards)`).join(', ')}`);
   } catch (error) {
     console.error('❌ Error during sync:');
