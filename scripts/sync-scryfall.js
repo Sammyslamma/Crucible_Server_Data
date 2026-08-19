@@ -27,6 +27,20 @@ const PURCHASE_VENDORS = ['tcgplayer', 'cardmarket', 'cardkingdom'];
 const MANAPOOL_ENABLED = 1;                        // Set 0 to skip the ManaPool step
 const MANAPOOL_PRICES_URL = 'https://manapool.com/api/v1/prices/singles';
 
+// Card Kingdom live price-list source (public API, no auth required).
+// The singles pricelist is large (~65 MB) so it is STREAM-PARSED below and
+// never loaded into memory as a whole. Supplies the direct purchase URL for
+// each listing plus the freshest daily retail/buylist prices for the
+// cardkingdom vendor. If the fetch fails, prices fall back to the MTGJson
+// cardkingdom feed.
+const CARDKINGDOM_ENABLED = 1;                     // Set 0 to skip the Card Kingdom step
+const CARDKINGDOM_SINGLES_URL = 'https://api.cardkingdom.com/api/v2/pricelist';
+
+// Live CK prices replace the MTGJson-sourced cardkingdom vendor data whenever
+// the live fetch succeeds. The app keeps only daily prices (no history), so the
+// live "today" price is exactly what we want; MTGJson remains the fallback.
+const CK_LIVEPRICES_PREFER_API = 1;                // Set 0 to keep MTGJson cardkingdom prices
+
 // Per-vendor homepage fallbacks for the client, written into manifest.json.
 // The app opens these when a direct purchase link is unavailable, so users
 // never land on a 404 page.
@@ -44,6 +58,7 @@ const CLEANUP_MTGJSON_TEMP = 1;      // mtgjson_temp.json
 const CLEANUP_MTGJSON_NDJSON = 0;    // mtgjson.ndjson
 const CLEANUP_PRICES_TEMP = 1;       // prices_temp.json
 const CLEANUP_MANAPOOL_TEMP = 1;     // manapool_temp.json
+const CLEANUP_CARDKINGDOM_TEMP = 1;  // cardkingdom_temp.json
 
 /**
  * Fetch the actual Scryfall download URL from metadata
@@ -164,6 +179,113 @@ async function fetchManapoolSingles(outputPath) {
     pipeline.on('end', () => {
       console.log(`✅ Mapped ${count} in-stock ManaPool cards to purchase URLs`);
       resolve(manapoolByScryfallId);
+    });
+
+    pipeline.on('error', reject);
+  });
+}
+
+/**
+ * Fetch the Card Kingdom singles price list and build:
+ *   1. ckByScryfallId — one reduced entry per CK listing keyed by scryfall_id
+ *      (URL, retail/buy prices, stock, foil flag).
+ *   2. updatedAt      — the price-list timestamp from the API meta block.
+ * The full payload is ~65 MB and is STREAM-PARSED with JSONStream, so it is
+ * never loaded into memory as a whole and never dumped to a large output file.
+ * Note: Card Kingdom returns several numeric fields as strings and is_foil as
+ * "true"/"false"; both are coerced here.
+ */
+async function fetchCardKingdomSingles(outputPath) {
+  if (!CARDKINGDOM_ENABLED) {
+    console.log('⏭️  Card Kingdom disabled — skipping');
+    return { ckByScryfallId: {}, updatedAt: null };
+  }
+
+  await downloadFile(CARDKINGDOM_SINGLES_URL, outputPath, 'Card Kingdom');
+
+  console.log('🃏 Extracting Card Kingdom listings (streaming)...');
+  return parseCardKingdomFile(outputPath);
+}
+
+/**
+ * Stream-parse a Card Kingdom price-list file into { ckByScryfallId, updatedAt }.
+ * Split out from fetchCardKingdomSingles so tests/offline runs can drive the
+ * same parser against a local file without re-downloading the ~65 MB list.
+ */
+function parseCardKingdomFile(outputPath) {
+  const ckByScryfallId = {};
+  let updatedAt = null;
+  let baseUrl = '';
+  let skippedNoScryfallId = 0;
+
+  return new Promise((resolve, reject) => {
+    const input = createReadStream(outputPath, { encoding: 'utf8' });
+    // Two independent stream parsers on the same input:
+    //   ['meta']       -> emits the small { created_at, base_url } header
+    //   ['data', true] -> emits each product listing (streamed, not in memory)
+    const metaStream = input.pipe(JSONStream.parse(['meta']));
+    const pipeline = input.pipe(JSONStream.parse(['data', true]));
+
+    metaStream.on('data', (meta) => {
+      if (!meta || typeof meta !== 'object') return;
+      if (typeof meta.created_at === 'string') {
+        updatedAt = meta.created_at;
+      }
+      if (typeof meta.base_url === 'string') {
+        baseUrl = meta.base_url;
+      }
+    });
+
+    pipeline.on('data', (listing) => {
+      try {
+        if (!listing || typeof listing !== 'object') return;
+        const scryfallId = listing.scryfall_id;
+        if (!scryfallId) {
+          // Sealed products and listings without a Scryfall ID can't join the
+          // light index (keyed by scryfall_id); skip them.
+          skippedNoScryfallId++;
+          return;
+        }
+
+        const priceRetail = parseFloat(listing.price_retail) || 0;
+        const priceBuy = parseFloat(listing.price_buy) || 0;
+        const qtyRetail = parseInt(listing.qty_retail, 10) || 0;
+        const qtyBuying = parseInt(listing.qty_buying, 10) || 0;
+        const isFoil = String(listing.is_foil).toLowerCase() === 'true';
+
+        // CK returns product URLs as relative paths (e.g. "mtg/4th-edition/x");
+        // resolve them against the API's base_url so purchaseUris are absolute.
+        let url = null;
+        if (typeof listing.url === 'string' && listing.url) {
+          try {
+            url = new URL(listing.url, baseUrl).toString();
+          } catch (err) {
+            url = listing.url;
+          }
+        }
+
+        // Keep only the fields the pipeline needs; one entry per CK listing.
+        if (!ckByScryfallId[scryfallId]) {
+          ckByScryfallId[scryfallId] = [];
+        }
+        ckByScryfallId[scryfallId].push({
+          url,
+          isFoil,
+          priceRetail,
+          qtyRetail,
+          priceBuy,
+          qtyBuying,
+        });
+      } catch (err) {
+        console.error(`Error parsing Card Kingdom listing: ${err.message}`);
+      }
+    });
+
+    pipeline.on('end', () => {
+      const unique = Object.keys(ckByScryfallId).length;
+      const total = Object.values(ckByScryfallId).reduce((n, arr) => n + arr.length, 0);
+      console.log(`✅ Parsed ${total} Card Kingdom listings across ${unique} Scryfall IDs` + (skippedNoScryfallId > 0 ? ` (${skippedNoScryfallId} without scryfall_id skipped)` : ''));
+      resolve({ ckByScryfallId, updatedAt, skippedNoScryfallId });
     });
 
     pipeline.on('error', reject);
@@ -652,7 +774,7 @@ function projectLightCard(card) {
  * Single-faced tokens have no cardTokenParts entry, or their entry only
  * contains their own ID, so relatedTokens will be empty and not added.
  */
-function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}, manapoolByScryfallId = {}) {
+function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}, manapoolByScryfallId = {}, ckUrlByScryfallId = {}) {
   console.log('🔀 Merging light index with tokenParts, tokenPairings, relatedTokens, and projecting fields...');
   const merged = {};
 
@@ -668,6 +790,15 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
     if (manapoolUrl) {
       projected.purchaseUris = projected.purchaseUris || {};
       projected.purchaseUris.manapool = manapoolUrl;
+    }
+
+    // Card Kingdom direct purchase URL — authoritative listing link from CK's
+    // own API (representative listing chosen by buildCardKingdomData). Overrides
+    // the Scryfall-sourced cardkingdom link when a live listing exists.
+    const ckUrl = ckUrlByScryfallId[scryfallId];
+    if (ckUrl) {
+      projected.purchaseUris = projected.purchaseUris || {};
+      projected.purchaseUris.cardkingdom = ckUrl;
     }
 
     // EXISTING — unchanged
@@ -702,10 +833,19 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
   const doubleFacedCount = Object.values(merged).filter(c => c.relatedTokens).length;
   const manualPairingCount = Object.values(merged).filter(c => c.tokenPairings).length;
   const manapoolLinked = Object.values(merged).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
+  let ckLinked = 0;
+  for (const [id, card] of Object.entries(merged)) {
+    if (card.purchaseUris && card.purchaseUris.cardkingdom && ckUrlByScryfallId[id] === card.purchaseUris.cardkingdom) {
+      ckLinked++;
+    }
+  }
   console.log(`   Double-faced token faces (Scryfall layout): ${doubleFacedCount}`);
   console.log(`   Manually paired token faces (MTGJson): ${manualPairingCount}`);
   if (manapoolLinked > 0) {
     console.log(`   ManaPool purchase URLs linked: ${manapoolLinked}`);
+  }
+  if (ckLinked > 0) {
+    console.log(`   Card Kingdom purchase URLs linked: ${ckLinked}`);
   }
 
   return merged;
@@ -754,17 +894,11 @@ function filterPaperPrices(paper) {
 /**
  * Extract prices from MTGJson format (keyed by UUID, not Scryfall ID)
  * Uses the pre-built UUID->Scryfall ID mapping to match prices
- * Returns both combined and per-vendor price data
+ * Returns the combined (merged) price index keyed by Scryfall ID
  */
 function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId) {
   console.log('   Extracting price data...');
   const prices = {};
-  const pricesByVendor = {};  // { vendor: { scryfallId: { mtgjsonUuid, prices } } }
-  
-  // Initialize vendor maps
-  for (const vendor of PRICE_CONFIG.vendors) {
-    pricesByVendor[vendor] = {};
-  }
   
   let matched = 0;
   let available = 0;
@@ -791,19 +925,87 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
       mtgjsonUuid: uuid,
       prices: filteredPrices,
     };
-    
-    // Also store per-vendor for split files
-    for (const [vendor, vendorPrices] of Object.entries(filteredPrices)) {
-      pricesByVendor[vendor][scryfallId] = {
-        mtgjsonUuid: uuid,
-        prices: vendorPrices,
-      };
-    }
   }
 
   console.log(`✅ Extracted prices for ${matched} cards`);
   
-  return { prices, pricesByVendor };
+  return { prices };
+}
+
+/**
+ * Reduce the raw Card Kingdom listings to one daily-price object per Scryfall
+ * card plus a representative purchase URL, in the same shape MTGJson produces
+ * for the cardkingdom vendor so the app can consume it unchanged.
+ *
+ * For each card:
+ *   - normal retail  = price of the cheapest in-stock non-foil listing (or the
+ *     cheapest non-foil listing if none are in stock)
+ *   - foil retail    = same, across foil listings
+ *   - normal/foil buy = highest buylist price CK will pay (0 = not buying),
+ *     only included when PRICE_CONFIG.includeBuylist is enabled
+ *   - purchase URL   = the representative normal listing, else the foil listing
+ *
+ * Only daily prices are kept: a single date key (priceDate) holds the latest
+ * snapshot; nothing historical accumulates.
+ */
+function buildCardKingdomData(ckByScryfallId, priceDate) {
+  console.log('   Building live Card Kingdom data (URLs + daily prices)...');
+  const ckUrlByScryfallId = {};
+  const ckPriceMap = {};
+  let mapped = 0;
+
+  const pickLowest = (group) => {
+    const inStock = group.filter(l => l.qtyRetail > 0);
+    const candidates = inStock.length > 0 ? inStock : group;
+    return candidates.reduce((best, l) => (!best || l.priceRetail < best.priceRetail ? l : best), null);
+  };
+
+  for (const [scryfallId, listings] of Object.entries(ckByScryfallId)) {
+    if (!Array.isArray(listings) || listings.length === 0) continue;
+
+    const nonFoil = listings.filter(l => !l.isFoil);
+    const foils = listings.filter(l => l.isFoil);
+
+    const normalListing = pickLowest(nonFoil);
+    const foilListing = pickLowest(foils);
+
+    const urlListing = normalListing || foilListing;
+    // Only surface a purchase URL when the representative listing actually has
+    // a price; 0-price (delisted) cards fall back to the Scryfall link / store
+    // homepage instead.
+    if (urlListing && urlListing.url && urlListing.priceRetail > 0) {
+      ckUrlByScryfallId[scryfallId] = urlListing.url;
+    }
+
+    const retail = {};
+    if (normalListing && normalListing.priceRetail > 0) {
+      retail.normal = { [priceDate]: normalListing.priceRetail };
+    }
+    if (foilListing && foilListing.priceRetail > 0) {
+      retail.foil = { [priceDate]: foilListing.priceRetail };
+    }
+
+    const buylist = {};
+    if (PRICE_CONFIG.includeBuylist) {
+      // Buylist: highest price CK will pay (0 means they are not buying).
+      const normalBuy = nonFoil.reduce((best, l) => (l.priceBuy > best ? l.priceBuy : best), 0);
+      const foilBuy = foils.reduce((best, l) => (l.priceBuy > best ? l.priceBuy : best), 0);
+      if (normalBuy > 0) buylist.normal = { [priceDate]: normalBuy };
+      if (foilBuy > 0) buylist.foil = { [priceDate]: foilBuy };
+    }
+
+    if (Object.keys(retail).length === 0 && Object.keys(buylist).length === 0) continue;
+
+    ckPriceMap[scryfallId] = {
+      currency: 'USD',
+      ...(Object.keys(retail).length > 0 && { retail }),
+      ...(Object.keys(buylist).length > 0 && { buylist }),
+    };
+    mapped++;
+  }
+
+  console.log(`   ✅ Live Card Kingdom data built for ${mapped} cards (${Object.keys(ckUrlByScryfallId).length} purchase URLs)`);
+  return { ckUrlByScryfallId, ckPriceMap };
 }
 
 /**
@@ -848,6 +1050,7 @@ async function sync() {
     const mtgjsonNdjsonPath = path.join(OUTPUT_DIR, 'mtgjson.ndjson');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
     const manapoolPath = path.join(OUTPUT_DIR, 'manapool_temp.json');
+    const cardkingdomPath = path.join(OUTPUT_DIR, 'cardkingdom_temp.json');
 
     // Download Scryfall (.jsonl.gz - gzipped NDJSON)
     if (!fs.existsSync(scryfallGzPath)) {
@@ -891,11 +1094,11 @@ async function sync() {
     }
 
     // Load converted card data
-    const scryfallCards = await loadNdjson(scryfallNdjsonPath, 'Scryfall');
-    const mtgjsonCards = await loadNdjson(mtgjsonNdjsonPath, 'MTGJson');
+    let scryfallCards = await loadNdjson(scryfallNdjsonPath, 'Scryfall');
+    let mtgjsonCards = await loadNdjson(mtgjsonNdjsonPath, 'MTGJson');
 
     // Build MTGJson UUID -> Scryfall ID mapping
-    const uuidToScryfallId = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
+    let uuidToScryfallId = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
     const scryfallToUuid = {};
     for (const [uuid, scryfallId] of Object.entries(uuidToScryfallId)) {
       if (!scryfallToUuid[scryfallId]) {
@@ -917,10 +1120,60 @@ async function sync() {
       console.log('⏭️  ManaPool disabled — skipping');
     }
 
+    // Fetch Card Kingdom purchase URLs + live prices (public API, no key).
+    // The singles pricelist is large (~65 MB) and is stream-parsed inside
+    // fetchCardKingdomSingles; failures here must not abort the whole sync,
+    // so cardkingdom prices fall back to the MTGJson-sourced feed.
+    let ckByScryfallId = {};
+    let ckUpdatedAt = null;
+    let ckSkipped = 0;
+    let ckUniqueIds = 0;
+    let ckProductsParsed = 0;
+    if (CARDKINGDOM_ENABLED) {
+      try {
+        const ckResult = await fetchCardKingdomSingles(cardkingdomPath);
+        ckByScryfallId = ckResult.ckByScryfallId;
+        ckUpdatedAt = ckResult.updatedAt;
+        ckSkipped = ckResult.skippedNoScryfallId || 0;
+        ckUniqueIds = Object.keys(ckByScryfallId).length;
+        ckProductsParsed = Object.values(ckByScryfallId).reduce((n, arr) => n + arr.length, 0);
+      } catch (err) {
+        console.error(`⚠️ Card Kingdom fetch failed (${err.message}) — continuing with MTGJson cardkingdom data`);
+        ckByScryfallId = {};
+      }
+    } else {
+      console.log('⏭️  Card Kingdom disabled — skipping');
+    }
+
+    // Reduce the raw CK listings into a representative purchase URL per card
+    // plus the daily price object in MTGJson's cardkingdom shape. The price
+    // date key comes from CK's own price-list timestamp (fallback: today).
+    let ckUrlByScryfallId = {};
+    let ckPriceMap = {};
+    if (Object.keys(ckByScryfallId).length > 0) {
+      let priceDate;
+      if (ckUpdatedAt) {
+        priceDate = ckUpdatedAt.slice(0, 10);
+      } else {
+        priceDate = new Date().toISOString().split('T')[0];
+        console.warn('⚠️ Card Kingdom meta.created_at missing — using today as the price date key');
+      }
+      const ckData = buildCardKingdomData(ckByScryfallId, priceDate);
+      ckUrlByScryfallId = ckData.ckUrlByScryfallId;
+      ckPriceMap = ckData.ckPriceMap;
+    }
+    // The raw CK listings are only needed for the reduction above; release them
+    // (along with the other big intermediates further down) to lower peak memory.
+    ckByScryfallId = null;
+
     // Build light index with token parts and UUID
     const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
-    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId);
+    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId, ckUrlByScryfallId);
 
+    // Release the large raw card maps — lightIndex is built and downstream only
+    // needs the UUID mappings and the merged price index.
+    mtgjsonCards = null;
+    scryfallCards = null;
 
     // Download prices
     if (!fs.existsSync(pricesPath)) {
@@ -931,57 +1184,83 @@ async function sync() {
     }
 
     console.log('\n💰 Processing prices...');
-    const priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
-    console.log(`   Loaded ${Object.keys(priceData).length} price entries from MTGJson`);
+    let priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
+    const pricesTotal = Object.keys(priceData).length;
+    console.log(`   Loaded ${pricesTotal} price entries from MTGJson`);
 
-    const { prices: extractedPrices, pricesByVendor } = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
+    let { prices: extractedPrices } = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
+
+    // Release the raw price blob and the UUID map — only the merged index is
+    // needed from here on. This is the single largest memory win in the run.
+    priceData = null;
+    uuidToScryfallId = null;
+
+    // Live Card Kingdom prices replace the MTGJson cardkingdom vendor when the
+    // live fetch succeeded. The app keeps only the latest daily snapshot, so
+    // the live "today" price (from CK's own pricelist) is exactly what we want.
+    // light_price_index.json.gz is the single source of truth for prices, so
+    // the override happens per card right here; MTGJson data remains the
+    // fallback when the live API is down or disabled.
+    let ckPricedCards = 0;
+    if (CK_LIVEPRICES_PREFER_API && Object.keys(ckPriceMap).length > 0) {
+      for (const [scryfallId, ckPrice] of Object.entries(ckPriceMap)) {
+        if (!lightIndex[scryfallId]) continue;
+        if (extractedPrices[scryfallId]) {
+          extractedPrices[scryfallId].prices.cardkingdom = ckPrice;
+        } else {
+          extractedPrices[scryfallId] = {
+            mtgjsonUuid: scryfallToUuid[scryfallId] || null,
+            prices: { cardkingdom: ckPrice },
+          };
+        }
+        ckPricedCards++;
+      }
+      console.log(`   💳 Live Card Kingdom prices applied to ${ckPricedCards} cards`);
+    }
 
     console.log('\n📝 Writing output files...');
-    
-    // Build vendor files info for manifest
-    const vendorFiles = {};
     
     // Write and compress the light index
     const lightIndexGzPath = path.join(OUTPUT_DIR, 'light_index.json.gz');
     const lightIndexTempPath = path.join(OUTPUT_DIR, 'light_index_temp.json');
     await writeAndCompressJson(lightIndex, lightIndexTempPath, lightIndexGzPath, 'light_index.json.gz');
     
-    // Write and compress the price index
+    // Write and compress the price index (single merged source of truth;
+    // per-store price files are intentionally not produced)
     const lightPriceIndexGzPath = path.join(OUTPUT_DIR, 'light_price_index.json.gz');
     const lightPriceIndexTempPath = path.join(OUTPUT_DIR, 'light_price_index_temp.json');
     await writeAndCompressJson(extractedPrices, lightPriceIndexTempPath, lightPriceIndexGzPath, 'light_price_index.json.gz');
-    
-    // Write separate vendor files (compressed)
-    for (const [vendor, vendorPrices] of Object.entries(pricesByVendor)) {
-      const vendorGzPath = path.join(OUTPUT_DIR, `light_price_index_${vendor}.json.gz`);
-      const vendorTempPath = path.join(OUTPUT_DIR, `light_price_index_${vendor}_temp.json`);
-      
-      await writeAndCompressJson(vendorPrices, vendorTempPath, vendorGzPath, `light_price_index_${vendor}.json.gz`);
-      vendorFiles[vendor] = {
-        size: fs.statSync(vendorGzPath).size,
-        cards: Object.keys(vendorPrices).length,
-      };
-    }
 
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
 
     const manapoolLinked = Object.values(lightIndex).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
+    let ckLinked = 0;
+    for (const [id, card] of Object.entries(lightIndex)) {
+      if (card.purchaseUris && card.purchaseUris.cardkingdom && ckUrlByScryfallId[id] === card.purchaseUris.cardkingdom) {
+        ckLinked++;
+      }
+    }
 
     const manifest = {
       version,
       generatedAt: timestamp,
       lightIndexCards: Object.keys(lightIndex).length,
       pricesCards: Object.keys(extractedPrices).length,
-      pricesTotal: Object.keys(priceData).length,
+      pricesTotal,
       storeHomeUrls: STORE_HOME_URLS,
       manapool: {
         inStockFromApi: Object.keys(manapoolByScryfallId).length,
         linkedInLightIndex: manapoolLinked,
       },
-      vendorFiles: Object.fromEntries(
-        Object.entries(vendorFiles).map(([v, f]) => [v, { size: f.size, cards: f.cards }])
-      ),
+      cardkingdom: {
+        productsParsed: ckProductsParsed,
+        uniqueScryfallIds: ckUniqueIds,
+        linkedInLightIndex: ckLinked,
+        pricedCards: ckPricedCards,
+        sealedSkipped: ckSkipped,
+        updatedAt: ckUpdatedAt,
+      },
     };
 
     fs.writeFileSync(path.join(OUTPUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));
@@ -995,6 +1274,7 @@ async function sync() {
       { path: mtgjsonNdjsonPath, name: 'mtgjson.ndjson', flag: CLEANUP_MTGJSON_NDJSON },
       { path: pricesPath, name: 'prices_temp.json', flag: CLEANUP_PRICES_TEMP },
       { path: manapoolPath, name: 'manapool_temp.json', flag: CLEANUP_MANAPOOL_TEMP },
+      { path: cardkingdomPath, name: 'cardkingdom_temp.json', flag: CLEANUP_CARDKINGDOM_TEMP },
     ];
     for (const file of tempFiles) {
       if (!file.flag) {
@@ -1021,9 +1301,9 @@ async function sync() {
     console.log(`📊 Stats:`);
     console.log(`   - Cards in light_index: ${Object.keys(lightIndex).length}`);
     console.log(`   - Cards in light_price_index: ${Object.keys(extractedPrices).length}`);
-    console.log(`   - Total price entries available: ${Object.keys(priceData).length}`);
+    console.log(`   - Total price entries available: ${pricesTotal}`);
     console.log(`   - ManaPool purchase URLs: ${manapoolLinked} cards linked (${Object.keys(manapoolByScryfallId).length} in stock from API)`);
-    console.log(`   - Vendor files: ${Object.keys(vendorFiles).map(v => `${v} (${vendorFiles[v].cards} cards)`).join(', ')}`);
+    console.log(`   - Card Kingdom: ${ckUniqueIds} scryfall IDs, ${ckPricedCards} priced, ${ckLinked} purchase URLs linked, ${ckSkipped} non-card entries skipped`);
   } catch (error) {
     console.error('❌ Error during sync:');
     console.error('Message:', error.message);
