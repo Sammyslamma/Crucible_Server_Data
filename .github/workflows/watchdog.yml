@@ -20,4 +20,3 @@ jobs:
           WATCHDOG_WEBHOOK_URL: ${{ secrets.WATCHDOG_WEBHOOK_URL }}
           WATCHDOG_NTFY_TOPIC: ${{ secrets.WATCHDOG_NTFY_TOPIC }}
           WATCHDOG_NOTIFY_ALWAYS: ${{ secrets.WATCHDOG_NOTIFY_ALWAYS }}
-          WATCHDOG_TEST_NTFY: '1'

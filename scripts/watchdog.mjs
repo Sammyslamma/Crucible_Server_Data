@@ -3,11 +3,11 @@
 //
 // It works on GitHub Actions today and, in the future, on any Node server via cron:
 //   node scripts/watchdog.mjs [--manifest-url <url-or-file>] [--webhook <url>]
-//                            [--ntfy-topic <topic-or-url>] [--test-ntfy]
+//                            [--ntfy-topic <topic-or-url>]
 //                            [--notify-always]
 //                            [--max-age-hours <n>] [--min-coverage <0..1>]
 // Or via env: WATCHDOG_MANIFEST_URL, WATCHDOG_WEBHOOK_URL, WATCHDOG_NTFY_TOPIC,
-//            WATCHDOG_TEST_NTFY, WATCHDOG_NOTIFY_ALWAYS,
+//            WATCHDOG_NOTIFY_ALWAYS,
 //            WATCHDOG_MAX_AGE_HOURS, WATCHDOG_MIN_COVERAGE
 //
 // It loads the manifest and FAILS (exit 1, optional webhook POST) when it detects:
@@ -36,7 +36,6 @@ const webhookUrl = get('--webhook', 'WATCHDOG_WEBHOOK_URL', '');
 const maxAgeHours = parseFloat(get('--max-age-hours', 'WATCHDOG_MAX_AGE_HOURS', String(DEFAULT_MAX_AGE_HOURS)));
 const minCoverage = parseFloat(get('--min-coverage', 'WATCHDOG_MIN_COVERAGE', String(DEFAULT_MIN_COVERAGE)));
 const ntfyTopic = get('--ntfy-topic', 'WATCHDOG_NTFY_TOPIC', '');
-const testNtfy = args.includes('--test-ntfy') || process.env.WATCHDOG_TEST_NTFY === '1';
 const notifyAlways = args.includes('--notify-always') || process.env.WATCHDOG_NOTIFY_ALWAYS === '1';
 
 async function loadManifest(src) {
@@ -54,32 +53,6 @@ function add(bad, label, msg) {
   if (bad) problems.push(`[${label}] ${msg}`);
   else ok.push(label.toLowerCase());
 }
-// Test notification: sends immediately and exits (for verifying ntfy setup).
-// Triggered by --test-ntfy CLI flag or WATCHDOG_TEST_NTFY=1 env var.
-// Runs before the main health check so it always works, even if the manifest
-// is unreachable.
-if (testNtfy && ntfyTopic) {
-  const ntfyUrl = /^https?:\/\//i.test(ntfyTopic)
-    ? ntfyTopic
-    : `https://ntfy.sh/${ntfyTopic}`;
-  try {
-    const res = await fetch(ntfyUrl, {
-      method: 'POST',
-      headers: {
-        'Title': 'Crucible Watchdog: Test notification [OK]',
-        'Tags': 'white_check_mark',
-        'Priority': 'low',
-      },
-      body: `ntfy integration is working!\nTopic: ${ntfyTopic}\nTime: ${new Date().toISOString()}`,
-    });
-    console.log(`ntfy test ${res.ok ? 'sent' : `failed ${res.status}`}`);
-  } catch (e) {
-    console.error(`ntfy test error: ${e.message}`);
-    process.exitCode = 1;
-  }
-  process.exit(process.exitCode ?? 0);
-}
-
 
 await (async () => {
   let m;
