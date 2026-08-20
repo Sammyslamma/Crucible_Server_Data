@@ -386,104 +386,6 @@ async function convertMtgJsonToNdjson(inputPath, outputPath) {
 }
 
 /**
- * Convert Scryfall JSON array to NDJSON
- * Scryfall bulk data is: [{card}, {card}, ...]
- * We need to convert to: card\ncard\ncard...
- */
-async function convertScryfallToNdjson(inputPath, outputPath) {
-  console.log(`🔄 Converting Scryfall to NDJSON (streaming JSON array)...`);
-  
-  return new Promise((resolve, reject) => {
-    const input = createReadStream(inputPath);
-    const output = createWriteStream(outputPath, { encoding: 'utf8' });
-    
-    // For a top-level JSON array, use [true] to emit each array element
-    const pipeline = input.pipe(JSONStream.parse([true]));
-    
-    let cardCount = 0;
-
-    pipeline.on('data', (card) => {
-      try {
-        if (card && typeof card === 'object') {
-          const line = JSON.stringify(card);
-          output.write(line + '\n');
-          cardCount++;
-          
-          if (cardCount % 10000 === 0) {
-            console.log(`  ✓ Converted ${cardCount} cards...`);
-          }
-        }
-      } catch (err) {
-        console.error(`Error writing card:`, err.message);
-      }
-    });
-
-    pipeline.on('end', () => {
-      output.end();
-      console.log(`✅ Converted ${cardCount} Scryfall cards to NDJSON`);
-      resolve();
-    });
-
-    pipeline.on('error', (err) => {
-      output.destroy();
-      console.error(`❌ Scryfall conversion error:`, err.message);
-      reject(err);
-    });
-
-    output.on('error', reject);
-  });
-}
-
-/**
- * Convert Prices to NDJSON using JSONStream
- * Structure: { meta: {...}, data: { uuid: { paper: {...}, mtgo: {...} }, ... } }
- */
-async function convertPricesToNdjson(inputPath, outputPath) {
-  console.log(`🔄 Converting Prices to NDJSON (streaming with JSONStream)...`);
-  
-  return new Promise((resolve, reject) => {
-    const input = createReadStream(inputPath);
-    const output = createWriteStream(outputPath, { encoding: 'utf8' });
-    
-    // Use $* to emit objects as { key: uuid, value: priceData }
-    const pipeline = input.pipe(JSONStream.parse(['data', '$*']));
-    
-    let priceCount = 0;
-
-    pipeline.on('data', ({ key, value }) => {
-      // key = uuid, value = price data
-      try {
-        const line = JSON.stringify({
-          uuid: key,
-          ...value
-        });
-        output.write(line + '\n');
-        priceCount++;
-        
-        if (priceCount % 10000 === 0) {
-          console.log(`  ✓ Converted ${priceCount} price entries...`);
-        }
-      } catch (err) {
-        console.error(`Error writing price for ${key}:`, err.message);
-      }
-    });
-
-    pipeline.on('end', () => {
-      output.end();
-      console.log(`✅ Converted ${priceCount} price entries to NDJSON`);
-      resolve();
-    });
-
-    pipeline.on('error', (err) => {
-      output.destroy();
-      reject(err);
-    });
-
-    output.on('error', reject);
-  });
-}
-
-/**
  * Stream parse NDJSON file (one object per line)
  */
 async function loadNdjson(filePath, name) {
@@ -519,10 +421,6 @@ async function loadNdjson(filePath, name) {
             if (!data[key]) data[key] = [];
             data[key].push(obj);
           }
-          // For Prices: key by scryfallId
-          else if (obj.scryfallId) {
-            data[obj.scryfallId] = obj;
-          }
           
           lineNumber++;
           
@@ -545,8 +443,7 @@ async function loadNdjson(filePath, name) {
             if (!data[key]) data[key] = [];
             data[key].push(obj);
           }
-          else if (obj.scryfallId) data[obj.scryfallId] = obj;
-        } catch (err) {}
+          } catch (err) {}
       }
       
       console.log(`✅ Loaded ${Object.keys(data).length} entries from ${name}`);
@@ -901,11 +798,9 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
   const prices = {};
   
   let matched = 0;
-  let available = 0;
 
   for (const [uuid, priceEntry] of Object.entries(priceDataByUuid)) {
     if (!priceEntry || typeof priceEntry !== 'object') continue;
-    available++;
     
     // Look up Scryfall ID for this UUID using the pre-built mapping
     const scryfallId = uuidToScryfallId[uuid];
@@ -1033,7 +928,7 @@ async function writeAndCompressJson(data, outputPath, gzPath, name) {
 }
 
 /**
- * Main sync function - PRICES ONLY MODE (Scryfall disabled, MTGJson enabled for UUID mapping)
+ * Main sync function - orchestrates the full daily pipeline (Scryfall + MTGJson + store prices/links)
  */
 async function sync() {
   try {
@@ -1042,6 +937,10 @@ async function sync() {
     }
 
     console.log('🚀 Starting full sync pipeline...\n');
+
+    // Self-audit: collect warnings so they land in manifest.json's "warnings"
+    // array (consumed by the watchdog) instead of aborting the sync.
+    const warnings = [];
 
     // Scryfall now serves .jsonl.gz files (gzipped NDJSON)
     const scryfallGzPath = path.join(OUTPUT_DIR, 'scryfall.jsonl.gz');
@@ -1114,10 +1013,14 @@ async function sync() {
         manapoolByScryfallId = await fetchManapoolSingles(manapoolPath);
       } catch (err) {
         console.error(`⚠️ ManaPool fetch failed (${err.message}) — continuing without ManaPool purchase URLs`);
+        warnings.push(`ManaPool fetch failed: ${err.message}`);
         manapoolByScryfallId = {};
       }
     } else {
       console.log('⏭️  ManaPool disabled — skipping');
+    }
+    if (MANAPOOL_ENABLED && Object.keys(manapoolByScryfallId).length === 0) {
+      warnings.push('ManaPool returned no in-stock products — possible API/schema change');
     }
 
     // Fetch Card Kingdom purchase URLs + live prices (public API, no key).
@@ -1129,6 +1032,7 @@ async function sync() {
     let ckSkipped = 0;
     let ckUniqueIds = 0;
     let ckProductsParsed = 0;
+    let ckFetchFailed = false;
     if (CARDKINGDOM_ENABLED) {
       try {
         const ckResult = await fetchCardKingdomSingles(cardkingdomPath);
@@ -1138,11 +1042,16 @@ async function sync() {
         ckUniqueIds = Object.keys(ckByScryfallId).length;
         ckProductsParsed = Object.values(ckByScryfallId).reduce((n, arr) => n + arr.length, 0);
       } catch (err) {
+        ckFetchFailed = true;
         console.error(`⚠️ Card Kingdom fetch failed (${err.message}) — continuing with MTGJson cardkingdom data`);
+        warnings.push(`Card Kingdom fetch failed: ${err.message}`);
         ckByScryfallId = {};
       }
     } else {
       console.log('⏭️  Card Kingdom disabled — skipping');
+    }
+    if (!ckFetchFailed && ckUniqueIds === 0 && CARDKINGDOM_ENABLED) {
+      warnings.push('Card Kingdom returned 0 products — possible API/schema change');
     }
 
     // Reduce the raw CK listings into a representative purchase URL per card
@@ -1157,6 +1066,7 @@ async function sync() {
       } else {
         priceDate = new Date().toISOString().split('T')[0];
         console.warn('⚠️ Card Kingdom meta.created_at missing — using today as the price date key');
+        warnings.push('Card Kingdom meta.created_at missing — used today as the daily price date');
       }
       const ckData = buildCardKingdomData(ckByScryfallId, priceDate);
       ckUrlByScryfallId = ckData.ckUrlByScryfallId;
@@ -1165,6 +1075,10 @@ async function sync() {
     // The raw CK listings are only needed for the reduction above; release them
     // (along with the other big intermediates further down) to lower peak memory.
     ckByScryfallId = null;
+
+    if (ckUniqueIds > 0 && Object.keys(ckPriceMap).length === 0) {
+      warnings.push('Card Kingdom parsed listings but produced 0 priced cards — price fields may have changed');
+    }
 
     // Build light index with token parts and UUID
     const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
@@ -1187,6 +1101,9 @@ async function sync() {
     let priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
     const pricesTotal = Object.keys(priceData).length;
     console.log(`   Loaded ${pricesTotal} price entries from MTGJson`);
+    if (pricesTotal === 0) {
+      warnings.push('MTGJSON prices returned empty — pricing pipeline may be broken');
+    }
 
     let { prices: extractedPrices } = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
 
@@ -1242,11 +1159,18 @@ async function sync() {
       }
     }
 
+    const lightIndexCards = Object.keys(lightIndex).length;
+    const pricesCards = Object.keys(extractedPrices).length;
+    if (lightIndexCards === 0) warnings.push('Light index is empty — Scryfall/MTGJSON data problem');
+    if (lightIndexCards > 0 && pricesCards / lightIndexCards < 0.5) {
+      warnings.push(`Price coverage is unusually low (${pricesCards}/${lightIndexCards} cards)`);
+    }
+
     const manifest = {
       version,
       generatedAt: timestamp,
-      lightIndexCards: Object.keys(lightIndex).length,
-      pricesCards: Object.keys(extractedPrices).length,
+      lightIndexCards,
+      pricesCards,
       pricesTotal,
       storeHomeUrls: STORE_HOME_URLS,
       manapool: {
@@ -1261,6 +1185,7 @@ async function sync() {
         sealedSkipped: ckSkipped,
         updatedAt: ckUpdatedAt,
       },
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
 
     fs.writeFileSync(path.join(OUTPUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));

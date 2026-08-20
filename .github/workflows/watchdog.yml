@@ -1,0 +1,23 @@
+name: Data Watchdog
+
+on:
+  schedule:
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Run data-quality watchdog (alerts when sync/manifest indicates a problem)
+        run: node scripts/watchdog.mjs
+        env:
+          WATCHDOG_MANIFEST_URL: ${{ secrets.WATCHDOG_MANIFEST_URL }}
+          WATCHDOG_WEBHOOK_URL: ${{ secrets.WATCHDOG_WEBHOOK_URL }}
+          WATCHDOG_NTFY_TOPIC: ${{ secrets.WATCHDOG_NTFY_TOPIC }}
+          WATCHDOG_NOTIFY_ALWAYS: ${{ secrets.WATCHDOG_NOTIFY_ALWAYS }}
+          WATCHDOG_TEST_NTFY: '1'
