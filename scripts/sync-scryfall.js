@@ -1069,8 +1069,8 @@ async function sync() {
     if (MANAPOOL_ENABLED) {
       try {
         manapoolByScryfallId = await fetchManapoolSingles(manapoolPath);
-        sources.manaPool.ok = true;
-        sources.manaPool.inStock = Object.keys(manapoolByScryfallId).length;
+        sources.manapool.ok = true;
+        sources.manapool.inStock = Object.keys(manapoolByScryfallId).length;
       } catch (err) {
         console.error(`⚠️ ManaPool fetch failed (${err.message}) — continuing without ManaPool purchase URLs`);
         warnings.push(`ManaPool fetch failed: ${err.message}`);
@@ -1238,7 +1238,7 @@ async function sync() {
         ckFoilLinked++;
       }
     }
-    sources.manaPool.linked = manapoolLinked;
+    sources.manapool.linked = manapoolLinked;
     sources.cardkingdom.linked = ckLinked;
 
     const lightIndexCards = Object.keys(lightIndex).length;
