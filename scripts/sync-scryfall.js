@@ -942,6 +942,15 @@ async function sync() {
     // array (consumed by the watchdog) instead of aborting the sync.
     const warnings = [];
 
+    // Source tracking for watchdog health checks
+    const sources = {
+      scryfall:      { ok: false, cards: 0 },
+      mtgjson:       { ok: false, cards: 0 },
+      mtgjsonPrices: { ok: false, entries: 0 },
+      manapool:      { ok: false, inStock: 0, linked: 0 },
+      cardkingdom:   { ok: false, products: 0, uniqueIds: 0, priced: 0 },
+    };
+
     // Scryfall now serves .jsonl.gz files (gzipped NDJSON)
     const scryfallGzPath = path.join(OUTPUT_DIR, 'scryfall.jsonl.gz');
     const scryfallNdjsonPath = path.join(OUTPUT_DIR, 'scryfall.ndjson');
@@ -952,49 +961,75 @@ async function sync() {
     const cardkingdomPath = path.join(OUTPUT_DIR, 'cardkingdom_temp.json');
 
     // Download Scryfall (.jsonl.gz - gzipped NDJSON)
-    if (!fs.existsSync(scryfallGzPath)) {
-      const downloadUrl = await getScryfallDownloadUrl();
-      await downloadFile(downloadUrl, scryfallGzPath, 'Scryfall');
-    } else {
-      const stats = fs.statSync(scryfallGzPath);
-      console.log(`✅ Scryfall source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
-    }
+    try {
+      if (!fs.existsSync(scryfallGzPath)) {
+        const downloadUrl = await getScryfallDownloadUrl();
+        await downloadFile(downloadUrl, scryfallGzPath, 'Scryfall');
+      } else {
+        const stats = fs.statSync(scryfallGzPath);
+        console.log(`✅ Scryfall source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+      }
+      sources.scryfall.ok = true;
 
-    // Decompress .jsonl.gz to .ndjson (it's already NDJSON, just gzipped)
-    if (!fs.existsSync(scryfallNdjsonPath)) {
-      console.log(`🔄 Decompressing Scryfall NDJSON...`);
-      await new Promise((resolve, reject) => {
-        const input = createReadStream(scryfallGzPath);
-        const output = createWriteStream(scryfallNdjsonPath);
-        input.pipe(zlib.createGunzip()).pipe(output)
-          .on('finish', () => {
-            const stats = fs.statSync(scryfallNdjsonPath);
-            console.log(`✅ Decompressed Scryfall NDJSON (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
-            resolve();
-          })
-          .on('error', reject);
-      });
-    } else {
-      console.log('✅ Scryfall NDJSON exists');
+      // Decompress .jsonl.gz to .ndjson (it's already NDJSON, just gzipped)
+      if (!fs.existsSync(scryfallNdjsonPath)) {
+        console.log(`🔄 Decompressing Scryfall NDJSON...`);
+        await new Promise((resolve, reject) => {
+          const input = createReadStream(scryfallGzPath);
+          const output = createWriteStream(scryfallNdjsonPath);
+          input.pipe(zlib.createGunzip()).pipe(output)
+            .on('finish', () => {
+              const stats = fs.statSync(scryfallNdjsonPath);
+              console.log(`✅ Decompressed Scryfall NDJSON (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+              resolve();
+            })
+            .on('error', reject);
+        });
+      } else {
+        console.log('✅ Scryfall NDJSON exists');
+      }
+    } catch (err) {
+      console.error(`⚠️ Scryfall download/processing failed (${err.message})`);
+      warnings.push(`Scryfall download failed: ${err.message}`);
+      sources.scryfall.ok = false;
     }
 
     // Download and convert MTGJson
-    if (!fs.existsSync(mtgjsonPath)) {
-      await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
-    } else {
-      const stats = fs.statSync(mtgjsonPath);
-      console.log(`✅ MTGJson source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+    try {
+      if (!fs.existsSync(mtgjsonPath)) {
+        await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
+      } else {
+        const stats = fs.statSync(mtgjsonPath);
+        console.log(`✅ MTGJson source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+      }
+      sources.mtgjson.ok = true;
+
+      if (!fs.existsSync(mtgjsonNdjsonPath)) {
+        await convertMtgJsonToNdjson(mtgjsonPath, mtgjsonNdjsonPath);
+      } else {
+        console.log('✅ MTGJson NDJSON exists');
+      }
+    } catch (err) {
+      console.error(`⚠️ MTGJson download/processing failed (${err.message})`);
+      warnings.push(`MTGJson download failed: ${err.message}`);
+      sources.mtgjson.ok = false;
     }
 
-    if (!fs.existsSync(mtgjsonNdjsonPath)) {
-      await convertMtgJsonToNdjson(mtgjsonPath, mtgjsonNdjsonPath);
+    // Load converted card data (guard against missing files from failed downloads)
+    let scryfallCards = {};
+    let mtgjsonCards = {};
+    if (fs.existsSync(scryfallNdjsonPath)) {
+      scryfallCards = await loadNdjson(scryfallNdjsonPath, 'Scryfall');
+      sources.scryfall.cards = Object.keys(scryfallCards).length;
     } else {
-      console.log('✅ MTGJson NDJSON exists');
+      console.error('⚠️ Scryfall NDJSON not found — skipping card load');
     }
-
-    // Load converted card data
-    let scryfallCards = await loadNdjson(scryfallNdjsonPath, 'Scryfall');
-    let mtgjsonCards = await loadNdjson(mtgjsonNdjsonPath, 'MTGJson');
+    if (fs.existsSync(mtgjsonNdjsonPath)) {
+      mtgjsonCards = await loadNdjson(mtgjsonNdjsonPath, 'MTGJson');
+      sources.mtgjson.cards = Object.keys(mtgjsonCards).length;
+    } else {
+      console.error('⚠️ MTGJson NDJSON not found — skipping card load');
+    }
 
     // Build MTGJson UUID -> Scryfall ID mapping
     let uuidToScryfallId = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
@@ -1011,6 +1046,8 @@ async function sync() {
     if (MANAPOOL_ENABLED) {
       try {
         manapoolByScryfallId = await fetchManapoolSingles(manapoolPath);
+        sources.manaPool.ok = true;
+        sources.manaPool.inStock = Object.keys(manapoolByScryfallId).length;
       } catch (err) {
         console.error(`⚠️ ManaPool fetch failed (${err.message}) — continuing without ManaPool purchase URLs`);
         warnings.push(`ManaPool fetch failed: ${err.message}`);
@@ -1041,6 +1078,9 @@ async function sync() {
         ckSkipped = ckResult.skippedNoScryfallId || 0;
         ckUniqueIds = Object.keys(ckByScryfallId).length;
         ckProductsParsed = Object.values(ckByScryfallId).reduce((n, arr) => n + arr.length, 0);
+        sources.cardkingdom.ok = true;
+        sources.cardkingdom.products = ckProductsParsed;
+        sources.cardkingdom.uniqueIds = ckUniqueIds;
       } catch (err) {
         ckFetchFailed = true;
         console.error(`⚠️ Card Kingdom fetch failed (${err.message}) — continuing with MTGJson cardkingdom data`);
@@ -1090,19 +1130,29 @@ async function sync() {
     scryfallCards = null;
 
     // Download prices
-    if (!fs.existsSync(pricesPath)) {
-      await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
-    } else {
-      const stats = fs.statSync(pricesPath);
-      console.log(`✅ Prices source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
-    }
+    let priceData = {};
+    let pricesTotal = 0;
+    try {
+      if (!fs.existsSync(pricesPath)) {
+        await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
+      } else {
+        const stats = fs.statSync(pricesPath);
+        console.log(`✅ Prices source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+      }
+      sources.mtgjsonPrices.ok = true;
 
-    console.log('\n💰 Processing prices...');
-    let priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
-    const pricesTotal = Object.keys(priceData).length;
-    console.log(`   Loaded ${pricesTotal} price entries from MTGJson`);
-    if (pricesTotal === 0) {
-      warnings.push('MTGJSON prices returned empty — pricing pipeline may be broken');
+      console.log('\n💰 Processing prices...');
+      priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
+      pricesTotal = Object.keys(priceData).length;
+      sources.mtgjsonPrices.entries = pricesTotal;
+      console.log(`   Loaded ${pricesTotal} price entries from MTGJson`);
+      if (pricesTotal === 0) {
+        warnings.push('MTGJSON prices returned empty — pricing pipeline may be broken');
+      }
+    } catch (err) {
+      console.error(`⚠️ Prices download/processing failed (${err.message})`);
+      warnings.push(`MTGJson prices download failed: ${err.message}`);
+      sources.mtgjsonPrices.ok = false;
     }
 
     let { prices: extractedPrices } = extractPricesFromMtgJson(priceData, lightIndex, uuidToScryfallId);
@@ -1134,6 +1184,7 @@ async function sync() {
       }
       console.log(`   💳 Live Card Kingdom prices applied to ${ckPricedCards} cards`);
     }
+    sources.cardkingdom.priced = ckPricedCards;
 
     console.log('\n📝 Writing output files...');
     
@@ -1158,6 +1209,8 @@ async function sync() {
         ckLinked++;
       }
     }
+    sources.manaPool.linked = manapoolLinked;
+    sources.cardkingdom.linked = ckLinked;
 
     const lightIndexCards = Object.keys(lightIndex).length;
     const pricesCards = Object.keys(extractedPrices).length;
@@ -1172,6 +1225,7 @@ async function sync() {
       lightIndexCards,
       pricesCards,
       pricesTotal,
+      sources,
       storeHomeUrls: STORE_HOME_URLS,
       manapool: {
         inStockFromApi: Object.keys(manapoolByScryfallId).length,

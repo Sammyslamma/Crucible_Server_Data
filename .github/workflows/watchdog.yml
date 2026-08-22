@@ -2,7 +2,7 @@ name: Data Watchdog
 
 on:
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '30 23 * * *'
   workflow_dispatch:
 
 jobs:

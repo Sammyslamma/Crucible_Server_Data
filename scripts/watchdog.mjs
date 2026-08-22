@@ -13,6 +13,7 @@
 // It loads the manifest and FAILS (exit 1, optional webhook POST) when it detects:
 //   - STALE      : generatedAt is older than max-age-hours  (the daily sync stopped / an API broke)
 //   - WARNINGS   : the sync recorded an issue in manifest.warnings
+//   - SOURCE_FAIL: any source in manifest.sources has ok === false
 //   - CK_EMPTY   : cardkingdom.uniqueScryfallIds === 0      (CK schema/naked change)
 //   - PRICES_EMPTY: pricesCards or pricesTotal === 0        (pricing pipeline broken)
 //   - INDEX_EMPTY: lightIndexCards === 0                    (Scryfall/MTGJSON base broken)
@@ -47,11 +48,21 @@ async function loadManifest(src) {
   return JSON.parse(fs.readFileSync(src, 'utf8'));
 }
 
-const problems = [];
-const ok = [];
-function add(bad, label, msg) {
-  if (bad) problems.push(`[${label}] ${msg}`);
-  else ok.push(label.toLowerCase());
+function fmt(n) {
+  if (n == null || Number.isNaN(n)) return '0';
+  return n.toLocaleString();
+}
+
+function fmtAge(ageH) {
+  if (Number.isNaN(ageH)) return 'unknown';
+  if (ageH < 1) return `${(ageH * 60).toFixed(0)}m`;
+  return `${ageH.toFixed(1)}h`;
+}
+
+const checks = [];
+
+function addCheck(section, label, ok, detail) {
+  checks.push({ section, label, ok, detail });
 }
 
 await (async () => {
@@ -64,43 +75,96 @@ await (async () => {
     return;
   }
 
-  // Staleness
+  // --- Manifest freshness ---
   const generated = new Date(m.generatedAt);
-  if (Number.isNaN(generated.getTime())) {
-    add(true, 'STALE', `generatedAt missing/unparseable ("${m.generatedAt}")`);
-  } else {
-    const ageH = (Date.now() - generated.getTime()) / 3.6e6;
-    add(ageH > maxAgeHours, 'STALE', `manifest is ${ageH.toFixed(1)}h old (> ${maxAgeHours}h); last sync likely stopped`);
-    if (ageH <= maxAgeHours) ok.push(`fresh (${ageH.toFixed(1)}h)`);
+  let ageH = NaN;
+  if (!Number.isNaN(generated.getTime())) {
+    ageH = (Date.now() - generated.getTime()) / 3.6e6;
+  }
+  addCheck('Manifest', 'Freshness', !Number.isNaN(generated.getTime()) && ageH <= maxAgeHours,
+    Number.isNaN(generated.getTime())
+      ? `generatedAt missing/unparseable ("${m.generatedAt}")`
+      : `generated ${fmtAge(ageH)} ago (max ${maxAgeHours}h)`);
+
+  // --- Source API checks (each source records ok + counts in the manifest) ---
+  const sources = m.sources || {};
+
+  const sf = sources.scryfall || {};
+  addCheck('Data Sources', 'Scryfall API', sf.ok === true,
+    sf.ok ? `downloaded ${fmt(sf.cards)} cards` : 'download failed');
+
+  const mj = sources.mtgjson || {};
+  addCheck('Data Sources', 'MTGJson API', mj.ok === true,
+    mj.ok ? `downloaded ${fmt(mj.cards)} cards` : 'download failed');
+
+  const mpr = sources.mtgjsonPrices || {};
+  addCheck('Data Sources', 'MTGJson Prices API', mpr.ok === true,
+    mpr.ok ? `downloaded ${fmt(mpr.entries)} price entries` : 'download failed');
+
+  const mp = sources.manapool || {};
+  addCheck('Data Sources', 'ManaPool API', mp.ok === true,
+    mp.ok ? `${fmt(mp.inStock)} in-stock, ${fmt(mp.linked)} linked` : 'fetch failed');
+
+  const ck = sources.cardkingdom || {};
+  addCheck('Data Sources', 'Card Kingdom API', ck.ok === true,
+    ck.ok ? `${fmt(ck.uniqueIds)} unique IDs, ${fmt(ck.products)} products, ${fmt(ck.priced)} priced, ${fmt(ck.linked || 0)} linked` : 'fetch failed');
+
+  // --- Data processing checks ---
+  addCheck('Data Processing', 'Light Index', (m.lightIndexCards || 0) > 0,
+    `${fmt(m.lightIndexCards || 0)} cards extracted`);
+
+  addCheck('Data Processing', 'Light Price Index', (m.pricesCards || 0) > 0,
+    `${fmt(m.pricesCards || 0)} cards with prices`);
+
+  if ((m.lightIndexCards || 0) > 0) {
+    const coverage = (m.pricesCards || 0) / m.lightIndexCards;
+    addCheck('Data Processing', 'Price coverage', coverage >= minCoverage,
+      `${fmt(m.pricesCards || 0)}/${fmt(m.lightIndexCards)} cards (${(coverage * 100).toFixed(1)}%, min ${minCoverage * 100}%)`);
   }
 
-  // Warnings recorded by the sync itself
-  add(Array.isArray(m.warnings) && m.warnings.length > 0, 'WARNINGS', Array.isArray(m.warnings) && m.warnings.length > 0 ? m.warnings.join('; ') : '');
-
-  // Data sanity
-  const ck = m.cardkingdom || {};
-  if (m.cardkingdom) {
-    add(ck.uniqueScryfallIds === 0, 'CK_EMPTY', 'Card Kingdom returned 0 products — schema likely changed');
-  }
-  add((m.pricesCards ?? -1) === 0, 'PRICES_EMPTY', 'merged price index has 0 cards');
-  add((m.pricesTotal ?? -1) === 0, 'PRICES_EMPTY', 'MTGJSON returned 0 price entries');
-  add((m.lightIndexCards ?? 0) === 0, 'INDEX_EMPTY', 'light index has 0 cards');
-  if ((m.lightIndexCards || 0) > 0 && (m.pricesCards || 0) / m.lightIndexCards < minCoverage) {
-    add(true, 'COVERAGE_LOW', `price coverage ${m.pricesCards}/${m.lightIndexCards} is below ${minCoverage}`);
+  // --- Sync warnings ---
+  if (Array.isArray(m.warnings) && m.warnings.length > 0) {
+    addCheck('Sync Warnings', 'Warnings', false, m.warnings.join('; '));
   }
 
-  const header = `[watchdog] manifest ${m.version} — ${problems.length} problem(s)`;
-  const body = problems.length > 0
-    ? problems.map((p) => `  • ${p}`).join('\n')
-    : `  • OK ${ok.join(', ')}`;
-  console.log(header + '\n' + body);
+  // --- Build output ---
+  const problems = checks.filter(c => !c.ok);
+  const allOk = problems.length === 0;
 
+  // Group by section
+  const sections = {};
+  for (const c of checks) {
+    if (!sections[c.section]) sections[c.section] = [];
+    sections[c.section].push(c);
+  }
+
+  const lines = [];
+  lines.push('📋 Crucible Watchdog — Health Check Report');
+  lines.push(`Manifest: ${m.version || 'unknown'} (generated ${fmtAge(ageH)})`);
+  lines.push('');
+
+  for (const [sectionName, sectionChecks] of Object.entries(sections)) {
+    lines.push(`${sectionName}:`);
+    for (const c of sectionChecks) {
+      lines.push(`  ${c.ok ? '✅' : '❌'} ${c.label} — ${c.detail}`);
+    }
+    lines.push('');
+  }
+
+  lines.push(allOk
+    ? 'Result: ALL CHECKS PASSED ✅'
+    : `Result: ${problems.length} PROBLEM(S) DETECTED ❌`);
+
+  const body = lines.join('\n');
+  console.log(body);
+
+  // --- Webhook ---
   if (webhookUrl) {
     try {
       const res = await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: `${header}\n${body}` }),
+        body: JSON.stringify({ text: body }),
       });
       console.log(`webhook ${res.ok ? 'sent' : `failed ${res.status}`}`);
     } catch (e) {
@@ -108,27 +172,13 @@ await (async () => {
     }
   }
 
-  // ntfy push notification — fires on problems, or on success when notify-always is set
+  // --- ntfy push notification — fires on problems, or on success when notify-always is set ---
   if (ntfyTopic && (problems.length > 0 || notifyAlways)) {
-    // STALE / PRICES_EMPTY / INDEX_EMPTY = high (bypasses Do Not Disturb)
-    // CK_EMPTY / COVERAGE_LOW / WARNINGS = default (respects DND)
-    // All-green = low (gentle morning status ping)
-    const HIGH_PRIORITY_LABELS = new Set(['STALE', 'PRICES_EMPTY', 'INDEX_EMPTY']);
-    let ntfyPriority = problems.length > 0 ? 'default' : 'low';
-    let ntfyTags = problems.length > 0 ? 'warning' : 'white_check_mark';
-    let ntfyTitle = problems.length > 0
-      ? `Crucible Watchdog: ${problems.length} problem(s)`
-      : 'Crucible Watchdog: All green [OK]';
-    if (problems.length > 0) {
-      for (const p of problems) {
-        const label = p.match(/^\[([A-Z_]+)\]/)?.[1];
-        if (label && HIGH_PRIORITY_LABELS.has(label)) {
-          ntfyPriority = 'high';
-          ntfyTags = 'rotating_light';
-          break;
-        }
-      }
-    }
+    const ntfyPriority = problems.length > 0 ? 'high' : 'low';
+    const ntfyTags = problems.length > 0 ? 'rotating_light' : 'white_check_mark';
+    const ntfyTitle = allOk
+      ? 'Crucible Watchdog: ✅ All Checks Passed'
+      : `Crucible Watchdog: ❌ ${problems.length} problem(s) detected`;
 
     const ntfyUrl = /^https?:\/\//i.test(ntfyTopic)
       ? ntfyTopic
@@ -142,7 +192,7 @@ await (async () => {
           'Tags': ntfyTags,
           'Priority': ntfyPriority,
         },
-        body: `${header}\n${body}`,
+        body,
       });
       console.log(`ntfy ${res.ok ? 'sent' : `failed ${res.status}`}`);
     } catch (e) {
