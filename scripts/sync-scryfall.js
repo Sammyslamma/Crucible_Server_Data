@@ -5,8 +5,12 @@ import { createReadStream, createWriteStream } from 'fs';
 import zlib from 'zlib';
 import JSONStream from 'JSONStream';
 
-const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json';
-const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json';
+// MTGJSON serves pre-compressed .json.gz variants of every file. Downloading
+// those instead of the raw JSON cuts the transfer size dramatically
+// (AllPrintings: ~450 MB -> ~178 MB, AllPricesToday: ~50 MB -> ~5.5 MB).
+// Both are decompressed locally before parsing.
+const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json.gz';
+const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json.gz';
 
 const OUTPUT_DIR = './docs';
 
@@ -54,8 +58,10 @@ const STORE_HOME_URLS = {
 // Temp file cleanup: set to 1 to delete, 0 to keep (for data extraction)
 const CLEANUP_SCRYFALL_GZ = 1;       // scryfall.jsonl.gz
 const CLEANUP_SCRYFALL_NDJSON = 1;   // scryfall.ndjson
+const CLEANUP_MTGJSON_GZ = 1;        // mtgjson_temp.json.gz
 const CLEANUP_MTGJSON_TEMP = 1;      // mtgjson_temp.json
 const CLEANUP_MTGJSON_NDJSON = 0;    // mtgjson.ndjson
+const CLEANUP_PRICES_GZ = 1;         // prices_temp.json.gz
 const CLEANUP_PRICES_TEMP = 1;       // prices_temp.json
 const CLEANUP_MANAPOOL_TEMP = 1;     // manapool_temp.json
 const CLEANUP_CARDKINGDOM_TEMP = 1;  // cardkingdom_temp.json
@@ -137,6 +143,25 @@ async function downloadFile(url, outputPath, name) {
   } catch (error) {
     throw new Error(`Failed to download ${name}: ${error.message}`);
   }
+}
+
+/**
+ * Decompress a .gz file to its uncompressed form (streamed, low memory).
+ * Used for the MTGJSON .json.gz downloads before they are parsed.
+ */
+async function decompressGzip(inputPath, outputPath, name) {
+  console.log(`🔄 Decompressing ${name}...`);
+  return new Promise((resolve, reject) => {
+    const input = createReadStream(inputPath);
+    const output = createWriteStream(outputPath);
+    input.pipe(zlib.createGunzip()).pipe(output)
+      .on('finish', () => {
+        const stats = fs.statSync(outputPath);
+        console.log(`✅ Decompressed ${name} (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
+        resolve();
+      })
+      .on('error', reject);
+  });
 }
 
 /**
@@ -977,8 +1002,10 @@ async function sync() {
     // Scryfall now serves .jsonl.gz files (gzipped NDJSON)
     const scryfallGzPath = path.join(OUTPUT_DIR, 'scryfall.jsonl.gz');
     const scryfallNdjsonPath = path.join(OUTPUT_DIR, 'scryfall.ndjson');
+    const mtgjsonGzPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json.gz');
     const mtgjsonPath = path.join(OUTPUT_DIR, 'mtgjson_temp.json');
     const mtgjsonNdjsonPath = path.join(OUTPUT_DIR, 'mtgjson.ndjson');
+    const pricesGzPath = path.join(OUTPUT_DIR, 'prices_temp.json.gz');
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
     const manapoolPath = path.join(OUTPUT_DIR, 'manapool_temp.json');
     const cardkingdomPath = path.join(OUTPUT_DIR, 'cardkingdom_temp.json');
@@ -1017,15 +1044,21 @@ async function sync() {
       sources.scryfall.ok = false;
     }
 
-    // Download and convert MTGJson
+    // Download and convert MTGJson (compressed .gz download, then decompress)
     try {
-      if (!fs.existsSync(mtgjsonPath)) {
-        await downloadFile(MTGJSON_URL, mtgjsonPath, 'MTGJson');
+      if (!fs.existsSync(mtgjsonGzPath)) {
+        await downloadFile(MTGJSON_URL, mtgjsonGzPath, 'MTGJson (.gz)');
       } else {
-        const stats = fs.statSync(mtgjsonPath);
+        const stats = fs.statSync(mtgjsonGzPath);
         console.log(`✅ MTGJson source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
       }
       sources.mtgjson.ok = true;
+
+      if (!fs.existsSync(mtgjsonPath)) {
+        await decompressGzip(mtgjsonGzPath, mtgjsonPath, 'MTGJson');
+      } else {
+        console.log('✅ MTGJson decompressed file exists');
+      }
 
       if (!fs.existsSync(mtgjsonNdjsonPath)) {
         await convertMtgJsonToNdjson(mtgjsonPath, mtgjsonNdjsonPath);
@@ -1158,13 +1191,19 @@ async function sync() {
     let priceData = {};
     let pricesTotal = 0;
     try {
-      if (!fs.existsSync(pricesPath)) {
-        await downloadFile(MTGJSON_PRICES_URL, pricesPath, 'Prices');
+      if (!fs.existsSync(pricesGzPath)) {
+        await downloadFile(MTGJSON_PRICES_URL, pricesGzPath, 'Prices (.gz)');
       } else {
-        const stats = fs.statSync(pricesPath);
+        const stats = fs.statSync(pricesGzPath);
         console.log(`✅ Prices source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
       }
       sources.mtgjsonPrices.ok = true;
+
+      if (!fs.existsSync(pricesPath)) {
+        await decompressGzip(pricesGzPath, pricesPath, 'Prices');
+      } else {
+        console.log('✅ Prices decompressed file exists');
+      }
 
       console.log('\n💰 Processing prices...');
       priceData = JSON.parse(fs.readFileSync(pricesPath, 'utf8')).data;
@@ -1279,8 +1318,10 @@ async function sync() {
     const tempFiles = [
       { path: scryfallGzPath, name: 'scryfall.jsonl.gz', flag: CLEANUP_SCRYFALL_GZ },
       { path: scryfallNdjsonPath, name: 'scryfall.ndjson', flag: CLEANUP_SCRYFALL_NDJSON },
+      { path: mtgjsonGzPath, name: 'mtgjson_temp.json.gz', flag: CLEANUP_MTGJSON_GZ },
       { path: mtgjsonPath, name: 'mtgjson_temp.json', flag: CLEANUP_MTGJSON_TEMP },
       { path: mtgjsonNdjsonPath, name: 'mtgjson.ndjson', flag: CLEANUP_MTGJSON_NDJSON },
+      { path: pricesGzPath, name: 'prices_temp.json.gz', flag: CLEANUP_PRICES_GZ },
       { path: pricesPath, name: 'prices_temp.json', flag: CLEANUP_PRICES_TEMP },
       { path: manapoolPath, name: 'manapool_temp.json', flag: CLEANUP_MANAPOOL_TEMP },
       { path: cardkingdomPath, name: 'cardkingdom_temp.json', flag: CLEANUP_CARDKINGDOM_TEMP },
