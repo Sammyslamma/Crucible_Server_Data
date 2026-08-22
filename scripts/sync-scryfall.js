@@ -671,7 +671,7 @@ function projectLightCard(card) {
  * Single-faced tokens have no cardTokenParts entry, or their entry only
  * contains their own ID, so relatedTokens will be empty and not added.
  */
-function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}, manapoolByScryfallId = {}, ckUrlByScryfallId = {}) {
+function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}, manapoolByScryfallId = {}, ckUrlByScryfallId = {}, ckFoilUrlByScryfallId = {}) {
   console.log('🔀 Merging light index with tokenParts, tokenPairings, relatedTokens, and projecting fields...');
   const merged = {};
 
@@ -696,6 +696,15 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
     if (ckUrl) {
       projected.purchaseUris = projected.purchaseUris || {};
       projected.purchaseUris.cardkingdom = ckUrl;
+    }
+
+    // Card Kingdom foil purchase URL — separate key mirroring how prices use
+    // retail.normal / retail.foil. Old app versions ignore the extra key; new
+    // versions fall back to the normal URL when it is absent.
+    const ckFoilUrl = ckFoilUrlByScryfallId[scryfallId];
+    if (ckFoilUrl) {
+      projected.purchaseUris = projected.purchaseUris || {};
+      projected.purchaseUris.cardkingdom_foil = ckFoilUrl;
     }
 
     // EXISTING — unchanged
@@ -731,9 +740,13 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
   const manualPairingCount = Object.values(merged).filter(c => c.tokenPairings).length;
   const manapoolLinked = Object.values(merged).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
   let ckLinked = 0;
+  let ckFoilLinked = 0;
   for (const [id, card] of Object.entries(merged)) {
     if (card.purchaseUris && card.purchaseUris.cardkingdom && ckUrlByScryfallId[id] === card.purchaseUris.cardkingdom) {
       ckLinked++;
+    }
+    if (card.purchaseUris && card.purchaseUris.cardkingdom_foil && ckFoilUrlByScryfallId[id] === card.purchaseUris.cardkingdom_foil) {
+      ckFoilLinked++;
     }
   }
   console.log(`   Double-faced token faces (Scryfall layout): ${doubleFacedCount}`);
@@ -743,6 +756,9 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
   }
   if (ckLinked > 0) {
     console.log(`   Card Kingdom purchase URLs linked: ${ckLinked}`);
+  }
+  if (ckFoilLinked > 0) {
+    console.log(`   Card Kingdom foil purchase URLs linked: ${ckFoilLinked}`);
   }
 
   return merged;
@@ -846,6 +862,7 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
 function buildCardKingdomData(ckByScryfallId, priceDate) {
   console.log('   Building live Card Kingdom data (URLs + daily prices)...');
   const ckUrlByScryfallId = {};
+  const ckFoilUrlByScryfallId = {};
   const ckPriceMap = {};
   let mapped = 0;
 
@@ -870,6 +887,12 @@ function buildCardKingdomData(ckByScryfallId, priceDate) {
     // homepage instead.
     if (urlListing && urlListing.url && urlListing.priceRetail > 0) {
       ckUrlByScryfallId[scryfallId] = urlListing.url;
+    }
+
+    // Foil purchase URL — kept separately so foil-specific product links
+    // survive instead of being collapsed into the non-foil representative.
+    if (foilListing && foilListing.url && foilListing.priceRetail > 0) {
+      ckFoilUrlByScryfallId[scryfallId] = foilListing.url;
     }
 
     const retail = {};
@@ -899,8 +922,8 @@ function buildCardKingdomData(ckByScryfallId, priceDate) {
     mapped++;
   }
 
-  console.log(`   ✅ Live Card Kingdom data built for ${mapped} cards (${Object.keys(ckUrlByScryfallId).length} purchase URLs)`);
-  return { ckUrlByScryfallId, ckPriceMap };
+  console.log(`   ✅ Live Card Kingdom data built for ${mapped} cards (${Object.keys(ckUrlByScryfallId).length} normal URLs, ${Object.keys(ckFoilUrlByScryfallId).length} foil URLs)`);
+  return { ckUrlByScryfallId, ckFoilUrlByScryfallId, ckPriceMap };
 }
 
 /**
@@ -1098,6 +1121,7 @@ async function sync() {
     // plus the daily price object in MTGJson's cardkingdom shape. The price
     // date key comes from CK's own price-list timestamp (fallback: today).
     let ckUrlByScryfallId = {};
+    let ckFoilUrlByScryfallId = {};
     let ckPriceMap = {};
     if (Object.keys(ckByScryfallId).length > 0) {
       let priceDate;
@@ -1110,6 +1134,7 @@ async function sync() {
       }
       const ckData = buildCardKingdomData(ckByScryfallId, priceDate);
       ckUrlByScryfallId = ckData.ckUrlByScryfallId;
+      ckFoilUrlByScryfallId = ckData.ckFoilUrlByScryfallId;
       ckPriceMap = ckData.ckPriceMap;
     }
     // The raw CK listings are only needed for the reduction above; release them
@@ -1122,7 +1147,7 @@ async function sync() {
 
     // Build light index with token parts and UUID
     const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
-    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId, ckUrlByScryfallId);
+    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId, ckUrlByScryfallId, ckFoilUrlByScryfallId);
 
     // Release the large raw card maps — lightIndex is built and downstream only
     // needs the UUID mappings and the merged price index.
@@ -1204,9 +1229,13 @@ async function sync() {
 
     const manapoolLinked = Object.values(lightIndex).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
     let ckLinked = 0;
+    let ckFoilLinked = 0;
     for (const [id, card] of Object.entries(lightIndex)) {
       if (card.purchaseUris && card.purchaseUris.cardkingdom && ckUrlByScryfallId[id] === card.purchaseUris.cardkingdom) {
         ckLinked++;
+      }
+      if (card.purchaseUris && card.purchaseUris.cardkingdom_foil && ckFoilUrlByScryfallId[id] === card.purchaseUris.cardkingdom_foil) {
+        ckFoilLinked++;
       }
     }
     sources.manaPool.linked = manapoolLinked;
@@ -1235,6 +1264,7 @@ async function sync() {
         productsParsed: ckProductsParsed,
         uniqueScryfallIds: ckUniqueIds,
         linkedInLightIndex: ckLinked,
+        foilLinkedInLightIndex: ckFoilLinked,
         pricedCards: ckPricedCards,
         sealedSkipped: ckSkipped,
         updatedAt: ckUpdatedAt,
@@ -1282,7 +1312,7 @@ async function sync() {
     console.log(`   - Cards in light_price_index: ${Object.keys(extractedPrices).length}`);
     console.log(`   - Total price entries available: ${pricesTotal}`);
     console.log(`   - ManaPool purchase URLs: ${manapoolLinked} cards linked (${Object.keys(manapoolByScryfallId).length} in stock from API)`);
-    console.log(`   - Card Kingdom: ${ckUniqueIds} scryfall IDs, ${ckPricedCards} priced, ${ckLinked} purchase URLs linked, ${ckSkipped} non-card entries skipped`);
+    console.log(`   - Card Kingdom: ${ckUniqueIds} scryfall IDs, ${ckPricedCards} priced, ${ckLinked} purchase URLs linked (${ckFoilLinked} foil), ${ckSkipped} non-card entries skipped`);
   } catch (error) {
     console.error('❌ Error during sync:');
     console.error('Message:', error.message);
