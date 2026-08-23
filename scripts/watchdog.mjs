@@ -146,7 +146,8 @@ await (async () => {
   for (const [sectionName, sectionChecks] of Object.entries(sections)) {
     lines.push(`${sectionName}:`);
     for (const c of sectionChecks) {
-      lines.push(`  [${c.ok ? 'PASS' : 'FAIL'}] ${c.label} — ${c.detail}`);
+      // Keep detail only on failures — passes stay as clean one-liners
+      lines.push(`  [${c.ok ? 'PASS' : 'FAIL'}] ${c.label}${c.ok ? '' : ` — ${c.detail}`}`);
     }
     lines.push('');
   }
