@@ -144,8 +144,11 @@ await (async () => {
   lines.push('');
 
   for (const [sectionName, sectionChecks] of Object.entries(sections)) {
+    // Hide PASS Freshness line (age already shown in header); still shown on FAIL
+    const visible = sectionChecks.filter(c => !(c.ok && c.label === 'Freshness'));
+    if (visible.length === 0) continue;
     lines.push(`${sectionName}:`);
-    for (const c of sectionChecks) {
+    for (const c of visible) {
       // Keep detail only on failures — passes stay as clean one-liners
       lines.push(`  [${c.ok ? 'PASS' : 'FAIL'}] ${c.label}${c.ok ? '' : ` — ${c.detail}`}`);
     }
