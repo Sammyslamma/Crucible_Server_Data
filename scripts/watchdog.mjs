@@ -139,21 +139,21 @@ await (async () => {
   }
 
   const lines = [];
-  lines.push('📋 Crucible Watchdog — Health Check Report');
+  lines.push('Crucible Watchdog — Health Check Report');
   lines.push(`Manifest: ${m.version || 'unknown'} (generated ${fmtAge(ageH)})`);
   lines.push('');
 
   for (const [sectionName, sectionChecks] of Object.entries(sections)) {
     lines.push(`${sectionName}:`);
     for (const c of sectionChecks) {
-      lines.push(`  ${c.ok ? '✅' : '❌'} ${c.label} — ${c.detail}`);
+      lines.push(`  [${c.ok ? 'PASS' : 'FAIL'}] ${c.label} — ${c.detail}`);
     }
     lines.push('');
   }
 
   lines.push(allOk
-    ? 'Result: ALL CHECKS PASSED ✅'
-    : `Result: ${problems.length} PROBLEM(S) DETECTED ❌`);
+    ? 'Result: ALL CHECKS PASSED'
+    : `Result: ${problems.length} PROBLEM(S) DETECTED`);
 
   const body = lines.join('\n');
   console.log(body);
@@ -177,8 +177,8 @@ await (async () => {
     const ntfyPriority = problems.length > 0 ? 'high' : 'low';
     const ntfyTags = problems.length > 0 ? 'rotating_light' : 'white_check_mark';
     const ntfyTitle = allOk
-      ? 'Crucible Watchdog: ✅ All Checks Passed'
-      : `Crucible Watchdog: ❌ ${problems.length} problem(s) detected`;
+      ? 'Crucible Watchdog: All Checks Passed'
+      : `Crucible Watchdog: ${problems.length} problem(s) detected`;
 
     const ntfyUrl = /^https?:\/\//i.test(ntfyTopic)
       ? ntfyTopic
