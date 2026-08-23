@@ -657,6 +657,19 @@ function projectLightCard(card) {
     return out.length > 0 ? out : null;
   };
 
+  // Copy legalities but drop "not_legal" entries to keep the index slim.
+  // A format absent from the object (or the whole field being null) means
+  // the card is simply not legal there — the app treats null as not legal.
+  const copyLegalities = (src) => {
+    if (!src || typeof src !== 'object') return null;
+    const out = {};
+    for (const [format, status] of Object.entries(src)) {
+      if (status === 'not_legal') continue;
+      out[format] = status;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  };
+
   return {
     image_uris: copyMap(card.image_uris, ['normal']),
     card_faces: copyFaceList(card.card_faces),
@@ -675,6 +688,7 @@ function projectLightCard(card) {
     produced_mana: card.produced_mana || null,
     all_parts: card.all_parts || null,
     purchaseUris: copyPurchaseUris(card.purchase_uris),
+    legalities: copyLegalities(card.legalities),
     // Fields for name search and Card construction
     name: card.name || null,
     set: card.set || null,
