@@ -213,7 +213,7 @@ async function fetchManapoolSingles(outputPath) {
 /**
  * Fetch the Card Kingdom singles price list and build:
  *   1. ckByScryfallId — one reduced entry per CK listing keyed by scryfall_id
- *      (URL, retail/buy prices, stock, foil flag).
+ *      (URL, retail/buy prices, stock, foil + etched flags).
  *   2. updatedAt      — the price-list timestamp from the API meta block.
  * The full payload is ~65 MB and is STREAM-PARSED with JSONStream, so it is
  * never loaded into memory as a whole and never dumped to a large output file.
@@ -277,6 +277,16 @@ function parseCardKingdomFile(outputPath) {
         const qtyRetail = parseInt(listing.qty_retail, 10) || 0;
         const qtyBuying = parseInt(listing.qty_buying, 10) || 0;
         const isFoil = String(listing.is_foil).toLowerCase() === 'true';
+        // Card Kingdom tags etched foil printings with a "Foil Etched" / "Etched
+        // Foil" variation while still reporting is_foil as "true" (etched products
+        // land in the foil URL pool as "...-foil-etched"). Detect them here so the
+        // caller can emit a distinct retail.etched price instead of silently
+        // collapsing the finish into retail.foil. Only match explicit foil+etched
+        // word combos (variation finish marker or a -foil-etched/-etched-foil URL)
+        // rather than bare "etched", so normal cards whose names simply contain the
+        // word (e.g. "Etched Oracle") are never misclassified.
+        const isEtched = isFoil && (/etched/i.test(String(listing.variation || ''))
+          || /foil[_-]?etched|etched[_-]?foil/i.test(String(listing.url || '')));
 
         // CK returns product URLs as relative paths (e.g. "mtg/4th-edition/x");
         // resolve them against the API's base_url so purchaseUris are absolute.
@@ -296,6 +306,7 @@ function parseCardKingdomFile(outputPath) {
         ckByScryfallId[scryfallId].push({
           url,
           isFoil,
+          isEtched,
           priceRetail,
           qtyRetail,
           priceBuy,
@@ -891,6 +902,9 @@ function extractPricesFromMtgJson(priceDataByUuid, lightIndex, uuidToScryfallId)
  *   - normal retail  = price of the cheapest in-stock non-foil listing (or the
  *     cheapest non-foil listing if none are in stock)
  *   - foil retail    = same, across foil listings
+ *   - etched retail  = same, across etched-foil listings (also binned into the
+ *     foil pool, so older app versions that only read normal/foil keep
+ *     resolving the etched-only printings that are their only listing)
  *   - normal/foil buy = highest buylist price CK will pay (0 = not buying),
  *     only included when PRICE_CONFIG.includeBuylist is enabled
  *   - purchase URL   = the representative normal listing, else the foil listing
@@ -904,6 +918,7 @@ function buildCardKingdomData(ckByScryfallId, priceDate) {
   const ckFoilUrlByScryfallId = {};
   const ckPriceMap = {};
   let mapped = 0;
+  let etchedMapped = 0;
 
   const pickLowest = (group) => {
     const inStock = group.filter(l => l.qtyRetail > 0);
@@ -916,9 +931,11 @@ function buildCardKingdomData(ckByScryfallId, priceDate) {
 
     const nonFoil = listings.filter(l => !l.isFoil);
     const foils = listings.filter(l => l.isFoil);
+    const etched = listings.filter(l => l.isEtched); // subset of foils
 
     const normalListing = pickLowest(nonFoil);
     const foilListing = pickLowest(foils);
+    const etchedListing = pickLowest(etched);
 
     const urlListing = normalListing || foilListing;
     // Only surface a purchase URL when the representative listing actually has
@@ -941,6 +958,10 @@ function buildCardKingdomData(ckByScryfallId, priceDate) {
     if (foilListing && foilListing.priceRetail > 0) {
       retail.foil = { [priceDate]: foilListing.priceRetail };
     }
+    if (etchedListing && etchedListing.priceRetail > 0) {
+      retail.etched = { [priceDate]: etchedListing.priceRetail };
+      etchedMapped++;
+    }
 
     const buylist = {};
     if (PRICE_CONFIG.includeBuylist) {
@@ -961,7 +982,7 @@ function buildCardKingdomData(ckByScryfallId, priceDate) {
     mapped++;
   }
 
-  console.log(`   ✅ Live Card Kingdom data built for ${mapped} cards (${Object.keys(ckUrlByScryfallId).length} normal URLs, ${Object.keys(ckFoilUrlByScryfallId).length} foil URLs)`);
+  console.log(`   ✅ Live Card Kingdom data built for ${mapped} cards (${Object.keys(ckUrlByScryfallId).length} normal URLs, ${Object.keys(ckFoilUrlByScryfallId).length} foil URLs, ${etchedMapped} with a distinct etched price)`);
   return { ckUrlByScryfallId, ckFoilUrlByScryfallId, ckPriceMap };
 }
 
