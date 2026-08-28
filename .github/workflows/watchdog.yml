@@ -1,8 +1,9 @@
 name: Data Watchdog
 
 on:
-  schedule:
-    - cron: '30 23 * * *'
+  workflow_run:
+    workflows: ["Sync Scryfall + MTGJson"]
+    types: [completed]
   workflow_dispatch:
 
 jobs:
