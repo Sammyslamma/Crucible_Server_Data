@@ -1,6 +1,10 @@
 name: Data Watchdog
 
 on:
+  # Safety net: periodic check even if the sync itself silently stops.
+  # STALE alert (manifest too old) catches a dead sync; duplicates are harmless.
+  schedule:
+    - cron: '15 23 * * *'
   workflow_run:
     workflows: ["Sync Scryfall + MTGJson"]
     types: [completed]

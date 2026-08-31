@@ -49,3 +49,12 @@ jobs:
 
           # Force push to the data branch (rewriting history is fine — data snapshots)
           git push origin data --force
+
+      - name: Run data-quality watchdog (fires ntfy alert after every sync)
+        if: always()
+        run: node scripts/watchdog.mjs
+        env:
+          WATCHDOG_MANIFEST_URL: ${{ secrets.WATCHDOG_MANIFEST_URL }}
+          WATCHDOG_WEBHOOK_URL: ${{ secrets.WATCHDOG_WEBHOOK_URL }}
+          WATCHDOG_NTFY_TOPIC: ${{ secrets.WATCHDOG_NTFY_TOPIC }}
+          WATCHDOG_NOTIFY_ALWAYS: '1'

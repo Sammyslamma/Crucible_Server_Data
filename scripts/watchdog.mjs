@@ -198,9 +198,16 @@ await (async () => {
         },
         body,
       });
-      console.log(`ntfy ${res.ok ? 'sent' : `failed ${res.status}`}`);
+      if (!res.ok) {
+        // A silent notification failure is worse than a failed run — make it loud.
+        console.error(`ntfy FAILED ${res.status}: ${await res.text().catch(() => '')}`);
+        process.exitCode = 1;
+      } else {
+        console.log('ntfy sent');
+      }
     } catch (e) {
       console.error(`ntfy error: ${e.message}`);
+      process.exitCode = 1;
     }
   }
 
