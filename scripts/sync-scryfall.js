@@ -25,6 +25,15 @@ const PRICE_CONFIG = {
 // other non-paper vendors are intentionally excluded from the light index.
 const PURCHASE_VENDORS = ['tcgplayer', 'cardmarket', 'cardkingdom'];
 
+// Per-vendor counts of Scryfall search-stub purchase URIs dropped while
+// projecting the light index (see copyPurchaseUris in projectLightCard).
+// Logged in the merge summary so each run is self-verifying.
+const stubDropCounts = { tcgplayer: 0, cardmarket: 0 };
+
+// Per-vendor counts of exact product URLs constructed from MTGJSON vendor
+// identifiers during the merge (see mergeLightIndex).
+const mtgjsonUrlAdded = { tcgplayer: 0, cardmarket: 0 };
+
 // ManaPool purchase-link source (public API, verified no auth required).
 // Supplies a direct buy URL only for cards currently in stock at ManaPool;
 // prices remain MTGJson-sourced for conformity with the other stores.
@@ -500,6 +509,10 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
   console.log(`   MTGJson card names: ${Object.keys(mtgjsonCards).length}`);
   
   const uuidToScryfallId = {};
+  // MTGJSON vendor product identifiers keyed by Scryfall ID. MTGJSON's
+  // identifiers are authoritative for the same printing it prices, letting us
+  // construct exact product URLs for tokens Scryfall only stubs.
+  const vendorIdsByScryfallId = {};
   let matchCount = 0;
   let missingScryfallId = 0;
   let scryfallIdNotFound = 0;
@@ -533,6 +546,18 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
       uuidToScryfallId[mtgJsonUuid] = scryfallId;
       matchCount++;
 
+      // Capture vendor product IDs for the same printing.
+      const ids = mtgCard.identifiers || {};
+      const tcgplayerProductId = ids.tcgplayerProductId || null;
+      const cardmarketId = ids.cardmarketId || null;
+      // NOTE: cardKingdomId is deliberately NOT used to construct URLs — CK
+      // product pages are slug-based (/mtg/{set}/{name}), so an ID cannot
+      // produce an exact page. Guessing would reintroduce the bug this
+      // pipeline fixes; CK stays "price without link → dash" instead.
+      if (tcgplayerProductId || cardmarketId) {
+        vendorIdsByScryfallId[scryfallId] = { tcgplayerProductId, cardmarketId };
+      }
+
       processedCards++;
       if (processedCards % 50000 === 0) {
         console.log(`  ✓ Processed ${processedCards} MTGJson cards, ${matchCount} matched...`);
@@ -547,7 +572,7 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
   if (scryfallIdNotFound > 0) {
     console.log(`   ⚠️ ${scryfallIdNotFound} Scryfall IDs not found in Scryfall data`);
   }
-  return uuidToScryfallId;
+  return { uuidToScryfallId, vendorIdsByScryfallId };
 }
 
 /**
@@ -640,7 +665,19 @@ function projectLightCard(card) {
     for (const [k, v] of Object.entries(src)) {
       // Only surface the paper-marketplace links we actually use;
       // CardHoarder and any other vendor are dropped.
-      if (PURCHASE_VENDORS.includes(k) && typeof v === 'string' && v) out[k] = v;
+      if (!PURCHASE_VENDORS.includes(k) || typeof v !== 'string' || !v) continue;
+      // Reject search-page stubs — only exact product/listing URLs qualify.
+      // Scryfall injects these for tokens it has no vendor product for, and
+      // clicking them lands users on unpredictable search results. Dropping
+      // them here means the index only ever contains exact links.
+      const isStub =
+        (k === 'tcgplayer' && !v.includes('/product/')) ||
+        (k === 'cardmarket' && !v.includes('idProduct='));
+      if (isStub) {
+        stubDropCounts[k] = (stubDropCounts[k] || 0) + 1;
+        continue;
+      }
+      out[k] = v;
     }
     return Object.keys(out).length > 0 ? out : null;
   };
@@ -721,7 +758,7 @@ function projectLightCard(card) {
  * Single-faced tokens have no cardTokenParts entry, or their entry only
  * contains their own ID, so relatedTokens will be empty and not added.
  */
-function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}, manapoolByScryfallId = {}, ckUrlByScryfallId = {}, ckFoilUrlByScryfallId = {}) {
+function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, scryfallToUuid = {}, manapoolByScryfallId = {}, ckUrlByScryfallId = {}, ckFoilUrlByScryfallId = {}, vendorIdsByScryfallId = {}) {
   console.log('🔀 Merging light index with tokenParts, tokenPairings, relatedTokens, and projecting fields...');
   const merged = {};
 
@@ -755,6 +792,31 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
     if (ckFoilUrl) {
       projected.purchaseUris = projected.purchaseUris || {};
       projected.purchaseUris.cardkingdom_foil = ckFoilUrl;
+    }
+
+    // MTGJson-derived exact product URLs. These override Scryfall's
+    // purchase_uris because MTGJson's vendor identifiers are authoritative
+    // for the same printing we price — closing the token coverage gap where
+    // Scryfall only supplies search-page stubs (which were dropped in
+    // projectLightCard). Guard each with an exactness check: only upgrade,
+    // never downgrade an existing exact product URL.
+    const vendorIds = vendorIdsByScryfallId[scryfallId];
+    if (vendorIds) {
+      if (vendorIds.tcgplayerProductId && !/\/product\//.test(projected.purchaseUris?.tcgplayer || '')) {
+        projected.purchaseUris = projected.purchaseUris || {};
+        projected.purchaseUris.tcgplayer =
+          `https://www.tcgplayer.com/product/${vendorIds.tcgplayerProductId}`;
+        mtgjsonUrlAdded.tcgplayer++;
+      }
+      if (vendorIds.cardmarketId && !/idProduct=/.test(projected.purchaseUris?.cardmarket || '')) {
+        projected.purchaseUris = projected.purchaseUris || {};
+        projected.purchaseUris.cardmarket =
+          `https://www.cardmarket.com/en/Magic/Products?idProduct=${vendorIds.cardmarketId}`;
+        mtgjsonUrlAdded.cardmarket++;
+      }
+      // No Card Kingdom fallback: CK product URLs are slug-based, and
+      // cardKingdomId cannot build an exact page. CK simply stays
+      // "price without link → dash" for unmatched tokens.
     }
 
     // EXISTING — unchanged
@@ -809,6 +871,14 @@ function mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings = {}, 
   }
   if (ckFoilLinked > 0) {
     console.log(`   Card Kingdom foil purchase URLs linked: ${ckFoilLinked}`);
+  }
+  for (const vendor of ['tcgplayer', 'cardmarket']) {
+    if (stubDropCounts[vendor] > 0) {
+      console.log(`   ⚠️ Dropped ${stubDropCounts[vendor]} Scryfall search-stub URIs for ${vendor} (not exact product pages)`);
+    }
+    if (mtgjsonUrlAdded[vendor] > 0) {
+      console.log(`   MTGJson-derived ${vendor} product URLs added: ${mtgjsonUrlAdded[vendor]}`);
+    }
   }
 
   return merged;
@@ -1123,7 +1193,7 @@ async function sync() {
     }
 
     // Build MTGJson UUID -> Scryfall ID mapping
-    let uuidToScryfallId = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
+    const { uuidToScryfallId, vendorIdsByScryfallId } = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
     const scryfallToUuid = {};
     for (const [uuid, scryfallId] of Object.entries(uuidToScryfallId)) {
       if (!scryfallToUuid[scryfallId]) {
@@ -1215,7 +1285,7 @@ async function sync() {
 
     // Build light index with token parts and UUID
     const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
-    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId, ckUrlByScryfallId, ckFoilUrlByScryfallId);
+    const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId, ckUrlByScryfallId, ckFoilUrlByScryfallId, vendorIdsByScryfallId);
 
     // Release the large raw card maps — lightIndex is built and downstream only
     // needs the UUID mappings and the merged price index.
@@ -1314,6 +1384,31 @@ async function sync() {
     }
     sources.manapool.linked = manapoolLinked;
     sources.cardkingdom.linked = ckLinked;
+
+    // Price ⟺ link alignment: for each vendor, count cards where a purchase
+    // URL exists in the light index AND the price index carries that vendor's
+    // price. Also count the inverse (priced but linkless) — those render as
+    // inert dashes in the app by design.
+    const priceLinkStats = {};
+    for (const vendor of ['tcgplayer', 'cardmarket', 'cardkingdom', 'manapool']) {
+      let priced = 0, linked = 0, aligned = 0, pricedNoLink = 0;
+      const pricedIds = new Set(Object.keys(extractedPrices).filter(id => extractedPrices[id].prices && extractedPrices[id].prices[vendor] != null));
+      for (const [id, card] of Object.entries(lightIndex)) {
+        const hasPrice = pricedIds.has(id);
+        const hasUrl = !!(card.purchaseUris && card.purchaseUris[vendor]);
+        if (hasPrice) priced++;
+        if (hasUrl) linked++;
+        if (hasPrice && hasUrl) aligned++;
+        if (hasPrice && !hasUrl) pricedNoLink++;
+      }
+      priceLinkStats[vendor] = { priced, linked, aligned, pricedNoLink };
+    }
+    for (const [vendor, s] of Object.entries(priceLinkStats)) {
+      console.log(`   ${vendor}: ${s.aligned} price+link aligned, ${s.pricedNoLink} priced but linkless (dash), ${s.linked} linked total`);
+    }
+    if (Object.keys(lightIndex).length > 0 && (stubDropCounts.tcgplayer + stubDropCounts.cardmarket) > Object.keys(lightIndex).length * 0.1) {
+      warnings.push(`Unusually high search-stub drop count (tcgplayer: ${stubDropCounts.tcgplayer}, cardmarket: ${stubDropCounts.cardmarket}) — Scryfall purchase_uris schema may have changed`);
+    }
 
     const lightIndexCards = Object.keys(lightIndex).length;
     const pricesCards = Object.keys(extractedPrices).length;
