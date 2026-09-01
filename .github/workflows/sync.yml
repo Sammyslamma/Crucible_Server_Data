@@ -31,6 +31,9 @@ jobs:
 
       - name: Deploy data to data branch
         run: |
+          # Preserve the watchdog script; the orphan checkout will delete it
+          cp scripts/watchdog.mjs /tmp/watchdog.mjs
+
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
 
@@ -52,7 +55,7 @@ jobs:
 
       - name: Run data-quality watchdog (fires ntfy alert after every sync)
         if: always()
-        run: node scripts/watchdog.mjs
+        run: node /tmp/watchdog.mjs
         env:
           WATCHDOG_MANIFEST_URL: ${{ secrets.WATCHDOG_MANIFEST_URL }}
           WATCHDOG_WEBHOOK_URL: ${{ secrets.WATCHDOG_WEBHOOK_URL }}
