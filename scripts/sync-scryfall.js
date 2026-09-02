@@ -1193,7 +1193,7 @@ async function sync() {
     }
 
     // Build MTGJson UUID -> Scryfall ID mapping
-    const { uuidToScryfallId, vendorIdsByScryfallId } = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
+    let { uuidToScryfallId, vendorIdsByScryfallId } = createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards);
     const scryfallToUuid = {};
     for (const [uuid, scryfallId] of Object.entries(uuidToScryfallId)) {
       if (!scryfallToUuid[scryfallId]) {
