@@ -127,6 +127,24 @@ await (async () => {
     addCheck('Sync Warnings', 'Warnings', false, m.warnings.join('; '));
   }
 
+  // --- Per-vendor pricing health (from the new manifest.pricing block) ---
+  // Fails loudly when any configured store ends up with 0 priced cards even
+  // after Scryfall/MTGJSON fallbacks and last-known-good carry-over — i.e.
+  // "we tried everything and one store is still empty this run."
+  const priceVendors = m.pricing && m.pricing.vendors ? m.pricing.vendors : null;
+  if (priceVendors) {
+    for (const [v, d] of Object.entries(priceVendors)) {
+      const priced = d && d.priced ? d.priced : 0;
+      addCheck('Data Processing', `Priced: ${v}`, priced > 0,
+        priced > 0 ? `${fmt(priced)} cards` : '0 priced cards (every fallback exhausted)');
+    }
+    const carried = m.pricing.carriedOver || [];
+    if (carried.length > 0) {
+      addCheck('Sync Warnings', 'Carried over', false,
+        `last-known-good prices carried over for: ${carried.join(', ')}`);
+    }
+  }
+
   // --- Build output ---
   const problems = checks.filter(c => !c.ok);
   const allOk = problems.length === 0;

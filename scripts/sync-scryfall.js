@@ -13,6 +13,9 @@ const MTGJSON_URL = 'https://mtgjson.com/api/v5/AllPrintings.json.gz';
 const MTGJSON_PRICES_URL = 'https://mtgjson.com/api/v5/AllPricesToday.json.gz';
 
 const OUTPUT_DIR = './docs';
+// Raw URLs for the previous run's deployed data (data branch). Used by the
+// last-known-good carry-over guard when a vendor's price data collapses.
+const DATA_RAW_BASE = 'https://raw.githubusercontent.com/Sammyslamma/Crucible_Server_Data/data/';
 
 // Price index configuration - adjust to reduce file size
 const PRICE_CONFIG = {
@@ -1300,6 +1303,14 @@ async function sync() {
     const { cardTokenParts, cardTokenPairings } = extractTokenParts(mtgjsonCards, uuidToScryfallId);
     const lightIndex = mergeLightIndex(scryfallCards, cardTokenParts, cardTokenPairings, scryfallToUuid, manapoolByScryfallId, ckUrlByScryfallId, ckFoilUrlByScryfallId, vendorIdsByScryfallId);
 
+    // Capture Scryfall's own price snapshot (usd/eur per finish) before the raw
+    // card map is released — this is the SECONDARY price source for tcgplayer
+    // and cardmarket, used to fill cards MTGJSON's daily snapshot missed.
+    const scryPricesByScryfallId = {};
+    for (const [id, c] of Object.entries(scryfallCards)) {
+      if (c && c.prices) scryPricesByScryfallId[id] = c.prices;
+    }
+
     // Release the large raw card maps — lightIndex is built and downstream only
     // needs the UUID mappings and the merged price index.
     mtgjsonCards = null;
@@ -1367,6 +1378,102 @@ async function sync() {
       console.log(`   💳 Live Card Kingdom prices applied to ${ckPricedCards} cards`);
     }
     sources.cardkingdom.priced = ckPricedCards;
+
+    // ── Price source chains ───────────────────────────────────────────────
+    // Each store walks an ordered chain; the first source with data wins, and
+    // later levels only fill gaps. Sources:
+    //   tcgplayer:   MTGJSON → Scryfall (usd/usd_foil/usd_etched) → carry-over
+    //   cardmarket:  MTGJSON → Scryfall (eur/eur_foil)            → carry-over
+    //   cardkingdom: CK live API (already merged above) → MTGJSON  → carry-over
+    //   manapool:    MTGJSON (the live API supplies links only)     → carry-over
+    const syncDate = new Date().toISOString().split('T')[0];
+    const priceSources = {};
+    for (const vendor of ['tcgplayer', 'cardmarket', 'cardkingdom', 'manapool']) {
+      priceSources[vendor] = { primary: 'mtgjson', mtgjson: 0, scryfall: 0, manapool: 0, cardkingdom: 0, carriedOver: 0, priced: 0 };
+    }
+    priceSources.cardkingdom.primary = 'cardkingdom-api';
+    priceSources.manapool.primary = 'manapool-api';
+
+    // Scryfall secondary fill for tcgplayer/cardmarket
+    const SCRYFALL_PRICE_MAP = {
+      tcgplayer:  { currency: 'USD', fields: { normal: 'usd', foil: 'usd_foil', etched: 'usd_etched' } },
+      cardmarket: { currency: 'EUR', fields: { normal: 'eur', foil: 'eur_foil' } },
+    };
+    for (const [vendor, cfg] of Object.entries(SCRYFALL_PRICE_MAP)) {
+      let filled = 0;
+      for (const [scryfallId, entry] of Object.entries(extractedPrices)) {
+        if (entry.prices && entry.prices[vendor] != null) continue;
+        const rawScry = scryPricesByScryfallId[scryfallId];
+        if (!rawScry) continue;
+        const retail = {};
+        for (const [finish, field] of Object.entries(cfg.fields)) {
+          const v = rawScry[field];
+          if (v != null && v !== '') retail[finish] = { [syncDate]: parseFloat(v) };
+        }
+        if (Object.keys(retail).length === 0) continue;
+        entry.prices = entry.prices || {};
+        entry.prices[vendor] = { retail, currency: cfg.currency };
+        filled++;
+      }
+      priceSources[vendor].scryfall = filled;
+      if (filled > 0) console.log(`   🛟 Scryfall prices filled ${filled} ${vendor} cards missing from MTGJSON`);
+    }
+    // ── Last-known-good carry-over guard ──────────────────────────────────
+    // If a vendor's priced count collapsed vs the previous run (upstream outage,
+    // e.g. the 2026-09-02 MTGJSON build shipped zero cardmarket entries),
+    // republish the previous run's prices for that vendor instead of an empty
+    // column. Original date keys are preserved so the app can show staleness.
+    const vendorCarriedOver = [];
+    try {
+      const prevRes = await fetch(DATA_RAW_BASE + 'manifest.json', { headers: { 'User-Agent': 'CrucibleSync/1.0' } });
+      if (prevRes.ok) {
+        const prevManifest = await prevRes.json();
+        const prevPricing = prevManifest && prevManifest.pricing ? prevManifest.pricing.vendors : null;
+        let needsCarry = [];
+        if (prevPricing) {
+          needsCarry = Object.keys(priceSources).filter(v => {
+            const prev = prevPricing[v] ? (prevPricing[v].priced || 0) : 0;
+            const cur = Object.keys(extractedPrices).filter(id => extractedPrices[id].prices && extractedPrices[id].prices[v] != null).length;
+            return prev > 0 && cur < prev * 0.5;
+          });
+        }
+        if (needsCarry.length > 0) {
+          console.log(`   ⚠️ Vendor price collapse vs previous run: ${needsCarry.join(', ')} — carrying over last-known-good`);
+          const idxRes = await fetch(DATA_RAW_BASE + 'light_price_index.json.gz', { headers: { 'User-Agent': 'CrucibleSync/1.0' } });
+          if (idxRes.ok) {
+            const prevPrices = JSON.parse(zlib.gunzipSync(Buffer.from(await idxRes.arrayBuffer())).toString());
+            for (const vendor of needsCarry) {
+              let carried = 0;
+              for (const [id, prevEntry] of Object.entries(prevPrices)) {
+                if (!prevEntry.prices || prevEntry.prices[vendor] == null) continue;
+                if (extractedPrices[id] && extractedPrices[id].prices && extractedPrices[id].prices[vendor] != null) continue;
+                if (!extractedPrices[id]) extractedPrices[id] = { mtgjsonUuid: prevEntry.mtgjsonUuid || null, prices: {} };
+                extractedPrices[id].prices[vendor] = prevEntry.prices[vendor];
+                carried++;
+              }
+              priceSources[vendor].carriedOver = carried;
+              if (carried > 0) {
+                vendorCarriedOver.push(vendor);
+                warnings.push(`${vendor}: price collapse detected — ${carried} prices carried over from previous run (last-known-good, original dates preserved)`);
+                console.log(`   ♻️ Carried over ${carried} ${vendor} prices from previous run`);
+              }
+            }
+          } else {
+            console.log(`   ⚠️ Could not fetch previous price index (HTTP ${idxRes.status}) — carry-over skipped`);
+          }
+        }
+      } else {
+        console.log(`   ⚠️ Could not fetch previous manifest (HTTP ${prevRes.status}) — carry-over skipped`);
+      }
+    } catch (err) {
+      console.log(`   ⚠️ Carry-over check failed (${err.message}) — continuing with fresh data only`);
+    }
+
+    // Finalize per-vendor source attribution
+    for (const vendor of Object.keys(priceSources)) {
+      priceSources[vendor].priced = Object.keys(extractedPrices).filter(id => extractedPrices[id].prices && extractedPrices[id].prices[vendor] != null).length;
+    }
+    const pricing = { vendors: priceSources, carriedOver: vendorCarriedOver };
 
     console.log('\n📝 Writing output files...');
     
@@ -1447,6 +1554,7 @@ async function sync() {
       pricesCards,
       pricesTotal,
       sources,
+      pricing,
       storeHomeUrls: STORE_HOME_URLS,
       manapool: {
         inStockFromApi: Object.keys(manapoolByScryfallId).length,
