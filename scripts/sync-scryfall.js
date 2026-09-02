@@ -508,7 +508,7 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
   console.log(`   Scryfall cards: ${Object.keys(scryfallCards).length}`);
   console.log(`   MTGJson card names: ${Object.keys(mtgjsonCards).length}`);
   
-  const uuidToScryfallId = {};
+  let uuidToScryfallId = {};
   // MTGJSON vendor product identifiers keyed by Scryfall ID. MTGJSON's
   // identifiers are authoritative for the same printing it prices, letting us
   // construct exact product URLs for tokens Scryfall only stubs.
