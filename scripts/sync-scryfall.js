@@ -1419,8 +1419,18 @@ async function sync() {
     for (const [vendor, s] of Object.entries(priceLinkStats)) {
       console.log(`   ${vendor}: ${s.aligned} price+link aligned, ${s.pricedNoLink} priced but linkless (dash), ${s.linked} linked total`);
     }
-    if (Object.keys(lightIndex).length > 0 && (stubDropCounts.tcgplayer + stubDropCounts.cardmarket) > Object.keys(lightIndex).length * 0.1) {
-      warnings.push(`Unusually high search-stub drop count (tcgplayer: ${stubDropCounts.tcgplayer}, cardmarket: ${stubDropCounts.cardmarket}) — Scryfall purchase_uris schema may have changed`);
+    // Search-stub drops are expected and healthy: Scryfall emits search-page
+    // URIs for tokens/special printings with no vendor product (~13% of all
+    // printings per vendor as of 2026-09). Only alarm when a vendor's drop
+    // rate is so high that good links are likely being misclassified (e.g.
+    // the 2026-09 TCGplayer affiliate-redirect format change hit ~113%).
+    for (const vendor of ['tcgplayer', 'cardmarket']) {
+      const dropPct = Object.keys(lightIndex).length > 0
+        ? (stubDropCounts[vendor] / Object.keys(lightIndex).length) * 100
+        : 0;
+      if (dropPct > 25) {
+        warnings.push(`${vendor} search-stub drops at ${dropPct.toFixed(0)}% of cards (${stubDropCounts[vendor]}) — purchase URI exactness check may be misclassifying links (vendor/Scryfall URL format change?)`);
+      }
     }
 
     const lightIndexCards = Object.keys(lightIndex).length;
