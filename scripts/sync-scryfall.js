@@ -670,8 +670,21 @@ function projectLightCard(card) {
       // Scryfall injects these for tokens it has no vendor product for, and
       // clicking them lands users on unpredictable search results. Dropping
       // them here means the index only ever contains exact links.
+      // NOTE: Scryfall now wraps TCGplayer links in an affiliate redirect
+      // (partner.tcgplayer.com/...) with the real product URL percent-encoded
+      // in the `u` query param (e.g. ...product%2F697344...). Decode before
+      // checking so exact product links are kept; genuine search stubs still
+      // lack /product/ even after decoding.
+      let tcgExact = false;
+      if (k === 'tcgplayer') {
+        try {
+          tcgExact = decodeURIComponent(v).includes('/product/');
+        } catch {
+          tcgExact = v.includes('/product/');
+        }
+      }
       const isStub =
-        (k === 'tcgplayer' && !v.includes('/product/')) ||
+        (k === 'tcgplayer' && !tcgExact) ||
         (k === 'cardmarket' && !v.includes('idProduct='));
       if (isStub) {
         stubDropCounts[k] = (stubDropCounts[k] || 0) + 1;
