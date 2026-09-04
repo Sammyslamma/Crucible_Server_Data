@@ -41,7 +41,12 @@ const notifyAlways = args.includes('--notify-always') || process.env.WATCHDOG_NO
 
 async function loadManifest(src) {
   if (/^https?:/i.test(src)) {
-    const res = await fetch(src, { headers: { 'User-Agent': 'CrucibleWatchdog/1.0' } });
+    // Cache-bust: raw.githubusercontent.com (and most CDNs) key the cache on the
+    // full URL and may serve a copy up to ~5 min old - long enough to report the
+    // PREVIOUS manifest right after a fresh deploy. A unique query param forces
+    // a fresh origin fetch.
+    const bustUrl = `${src}${src.includes('?') ? '&' : '?'}_cb=${Date.now()}`;
+    const res = await fetch(bustUrl, { headers: { 'User-Agent': 'CrucibleWatchdog/1.0' } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }

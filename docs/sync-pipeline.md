@@ -135,6 +135,7 @@ A standalone health check on the deployed `manifest.json`. It `FAIL`s (exit 1, o
 - **(new)** `pricing.carriedOver` is non-empty — flagged as a warning so you know data is stale
 
 Run manually: `node scripts/watchdog.mjs [--manifest-url <url-or-file>]`.
+When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync completes, so the daily push reports a manifest age in minutes (the freshness ceiling is tightened to 4h on that trigger, so a sync that ran but failed to deploy still alerts). A daily cron remains as a safety net for a sync that stops running entirely - it stays quiet on success and only pushes when a check fails.
 
 ---
 
