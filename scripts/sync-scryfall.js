@@ -83,15 +83,20 @@ const CLEANUP_CARDKINGDOM_TEMP = 1;  // cardkingdom_temp.json
  */
 async function getScryfallDownloadUrl() {
   console.log('📋 Fetching Scryfall metadata...');
-  const response = await fetch('https://api.scryfall.com/bulk-data', {
-    headers: {
-      'User-Agent': 'CrucibleMTG/1.0',
-      'Accept': 'application/json'
+  // Retried like the downloads — this is the first network call of the run,
+  // and a transient blip here would abort before any download even starts.
+  const response = await withRetry(async () => {
+    const res = await fetch('https://api.scryfall.com/bulk-data', {
+      headers: {
+        'User-Agent': 'CrucibleMTG/1.0',
+        'Accept': 'application/json'
+      }
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to fetch Scryfall metadata: HTTP ${res.status}`);
     }
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch Scryfall metadata: ${response.status}`);
-  }
+    return res;
+  }, 'Scryfall metadata');
   const data = await response.json();
   const defaultCards = data.data.find(item => item.type === 'default_cards');
   if (!defaultCards) {
@@ -108,11 +113,48 @@ async function getScryfallDownloadUrl() {
 }
 
 /**
- * Download a file from URL with progress logging
+ * Retry an async operation with exponential backoff (2s -> 8s). Used for
+ * downloads so a single transient upstream blip (HTTP 502/503, connection
+ * reset) does not collapse the whole daily sync — a failed run deploys
+ * nothing, which costs a full day of fresh prices.
+ */
+const DOWNLOAD_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 2000;
+
+async function withRetry(operation, name) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= DOWNLOAD_RETRIES; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastError = err;
+      if (attempt < DOWNLOAD_RETRIES) {
+        const delayMs = RETRY_BASE_DELAY_MS * Math.pow(4, attempt - 1);
+        console.log(`  ⚠️ ${name} attempt ${attempt}/${DOWNLOAD_RETRIES} failed (${err.message}) — retrying in ${delayMs / 1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Download a file from URL with progress logging and transient-failure
+ * retries. Wraps downloadOnce so every caller (Scryfall, MTGJson, ManaPool,
+ * Card Kingdom) gets the same retry policy.
  */
 async function downloadFile(url, outputPath, name) {
   console.log(`⬇️  Downloading ${name}...`);
-  
+  await withRetry(() => downloadOnce(url, outputPath, name), name);
+}
+
+/**
+ * Single download attempt. Validates the completed transfer and removes the
+ * partial file on ANY failure so the run's existence-based resume checks can
+ * never mistake a truncated stub for a complete source on the next run.
+ */
+async function downloadOnce(url, outputPath, name) {
+  let file = null;
   try {
     const response = await fetch(url, {
       timeout: 600000,
@@ -126,14 +168,20 @@ async function downloadFile(url, outputPath, name) {
       throw new Error(`HTTP ${response.status}`);
     }
 
-    const file = createWriteStream(outputPath);
+    // Server-advertised size. Only comparable to the received body when the
+    // response is not transport-encoded (no Content-Encoding), so the check
+    // is skipped when a CDN compresses transparently.
+    const expectedSize = parseInt(response.headers.get('content-length'), 10) || null;
+    const isTransportEncoded = !!response.headers.get('content-encoding');
+
+    file = createWriteStream(outputPath);
     let downloadedSize = 0;
     let lastLog = 0;
 
     for await (const chunk of response.body) {
       downloadedSize += chunk.length;
       file.write(chunk);
-      
+
       if (downloadedSize - lastLog > 50 * 1024 * 1024) {
         console.log(`  Downloaded ${(downloadedSize / 1024 / 1024).toFixed(0)}MB...`);
         lastLog = downloadedSize;
@@ -141,8 +189,8 @@ async function downloadFile(url, outputPath, name) {
     }
 
     file.end();
-    
-    return new Promise((resolve, reject) => {
+
+    await new Promise((resolve, reject) => {
       file.on('finish', () => {
         console.log(`✅ ${name} complete (${(downloadedSize / 1024 / 1024).toFixed(0)}MB)`);
         resolve();
@@ -152,7 +200,31 @@ async function downloadFile(url, outputPath, name) {
         reject(err);
       });
     });
+
+    // Validate the completed transfer: an empty body, or a file shorter than
+    // the advertised Content-Length, means the download is truncated. Fail
+    // loudly (the partial file is removed below) instead of leaving a stub.
+    const writtenBytes = fs.statSync(outputPath).size;
+    if (writtenBytes === 0) {
+      throw new Error('downloaded file is empty (0 bytes)');
+    }
+    if (!isTransportEncoded && expectedSize != null && writtenBytes !== expectedSize) {
+      throw new Error(`truncated download (file is ${writtenBytes} bytes, server advertised ${expectedSize})`);
+    }
   } catch (error) {
+    // Never leave a partial download behind: resume logic only checks file
+    // existence, so a leftover stub would be reused as if it were complete.
+    if (file) {
+      try { file.destroy(); } catch { /* already closed */ }
+    }
+    try {
+      if (fs.existsSync(outputPath)) {
+        fs.unlinkSync(outputPath);
+        console.log(`   🗑️  Removed partial ${name} file (${error.message})`);
+      }
+    } catch (cleanupErr) {
+      console.log(`   ⚠️ Could not remove partial ${name} file: ${cleanupErr.message}`);
+    }
     throw new Error(`Failed to download ${name}: ${error.message}`);
   }
 }
@@ -166,13 +238,24 @@ async function decompressGzip(inputPath, outputPath, name) {
   return new Promise((resolve, reject) => {
     const input = createReadStream(inputPath);
     const output = createWriteStream(outputPath);
-    input.pipe(zlib.createGunzip()).pipe(output)
+    const gunzip = zlib.createGunzip();
+    // Route errors from every stage (source read, gunzip on corrupt/truncated
+    // data, output write) to reject. pipe() does not forward errors, so an
+    // unhandled zlib error would otherwise crash the process uncaught instead
+    // of landing in the caller's warning path.
+    const fail = (err) => {
+      output.destroy();
+      reject(err);
+    };
+    input.on('error', fail);
+    gunzip.on('error', fail);
+    output.on('error', fail);
+    input.pipe(gunzip).pipe(output)
       .on('finish', () => {
         const stats = fs.statSync(outputPath);
         console.log(`✅ Decompressed ${name} (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
         resolve();
-      })
-      .on('error', reject);
+      });
   });
 }
 
@@ -195,6 +278,9 @@ async function fetchManapoolSingles(outputPath) {
 
   return new Promise((resolve, reject) => {
     const input = createReadStream(outputPath, { encoding: 'utf8' });
+    // A read failure on the source must reject the promise — pipe() does not
+    // forward source errors, so without this the caller could hang forever.
+    input.on('error', reject);
     // ManaPool's `data` is an ARRAY of listing objects; `true` emits each element.
     const pipeline = input.pipe(JSONStream.parse(['data', true]));
     let count = 0;
@@ -257,6 +343,9 @@ function parseCardKingdomFile(outputPath) {
 
   return new Promise((resolve, reject) => {
     const input = createReadStream(outputPath, { encoding: 'utf8' });
+    // A read failure on the source must reject the promise — pipe() does not
+    // forward source errors, so without this the caller could hang forever.
+    input.on('error', reject);
     // Two independent stream parsers on the same input:
     //   ['meta']       -> emits the small { created_at, base_url } header
     //   ['data', true] -> emits each product listing (streamed, not in memory)
@@ -351,7 +440,13 @@ async function convertMtgJsonToNdjson(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     const input = createReadStream(inputPath);
     const output = createWriteStream(outputPath, { encoding: 'utf8' });
-    
+    // A read failure on the source must reject the promise — pipe() does not
+    // forward source errors, so without this the conversion could hang forever.
+    input.on('error', (err) => {
+      output.destroy();
+      reject(err);
+    });
+
     // Parse just ['data'] to get the entire data object
     const pipeline = input.pipe(JSONStream.parse(['data']));
     
@@ -569,11 +664,13 @@ function createMtgJsonToScryfallMap(mtgjsonCards, scryfallCards) {
   }
 
   console.log(`✅ Mapped ${matchCount} MTGJson UUIDs to Scryfall IDs`);
+  // Both counters are per card VERSION (printing), not per unique card name —
+  // a card with 50 printings contributes up to 50 to either counter.
   if (missingScryfallId > 0) {
-    console.log(`   ⚠️ ${missingScryfallId} cards had no identifiers.scryfallId`);
+    console.log(`   ⚠️ ${missingScryfallId} card versions had no identifiers.scryfallId`);
   }
   if (scryfallIdNotFound > 0) {
-    console.log(`   ⚠️ ${scryfallIdNotFound} Scryfall IDs not found in Scryfall data`);
+    console.log(`   ⚠️ ${scryfallIdNotFound} card versions had a Scryfall ID not present in the Scryfall data`);
   }
   return { uuidToScryfallId, vendorIdsByScryfallId };
 }
@@ -1085,7 +1182,11 @@ async function writeAndCompressJson(data, outputPath, gzPath, name) {
     const input = fs.createReadStream(tempPath);
     const output = fs.createWriteStream(gzPath);
     const gzip = zlib.createGzip();
-    
+
+    // pipe() does not forward errors — listen on every stage so a read or
+    // gzip failure rejects loudly instead of crashing the process uncaught.
+    input.on('error', reject);
+    gzip.on('error', reject);
     input.pipe(gzip).pipe(output)
       .on('finish', () => {
         fs.unlinkSync(tempPath);
@@ -1131,9 +1232,25 @@ async function sync() {
     const manapoolPath = path.join(OUTPUT_DIR, 'manapool_temp.json');
     const cardkingdomPath = path.join(OUTPUT_DIR, 'cardkingdom_temp.json');
 
+    // Resume guard for downloadable sources: a 0-byte leftover from a run that
+    // died before writing anything is treated as absent so the source is
+    // re-downloaded. (Non-empty truncation is handled by downloadFile, which
+    // deletes its own partial files on failure.)
+    const existsAndValid = (filePath) => {
+      try {
+        if (fs.existsSync(filePath) && fs.statSync(filePath).size === 0) {
+          fs.unlinkSync(filePath);
+          console.log(`   🗑️  Removed empty ${path.basename(filePath)} (previous run died mid-download)`);
+        }
+      } catch (err) {
+        console.log(`   ⚠️ Could not inspect ${path.basename(filePath)}: ${err.message}`);
+      }
+      return fs.existsSync(filePath);
+    };
+
     // Download Scryfall (.jsonl.gz - gzipped NDJSON)
     try {
-      if (!fs.existsSync(scryfallGzPath)) {
+      if (!existsAndValid(scryfallGzPath)) {
         const downloadUrl = await getScryfallDownloadUrl();
         await downloadFile(downloadUrl, scryfallGzPath, 'Scryfall');
       } else {
@@ -1142,20 +1259,11 @@ async function sync() {
       }
       sources.scryfall.ok = true;
 
-      // Decompress .jsonl.gz to .ndjson (it's already NDJSON, just gzipped)
+      // Decompress .jsonl.gz to .ndjson (it's already NDJSON, just gzipped).
+      // Uses the shared streamed decompressor so corrupt/truncated sources
+      // reject loudly instead of crashing the process uncaught.
       if (!fs.existsSync(scryfallNdjsonPath)) {
-        console.log(`🔄 Decompressing Scryfall NDJSON...`);
-        await new Promise((resolve, reject) => {
-          const input = createReadStream(scryfallGzPath);
-          const output = createWriteStream(scryfallNdjsonPath);
-          input.pipe(zlib.createGunzip()).pipe(output)
-            .on('finish', () => {
-              const stats = fs.statSync(scryfallNdjsonPath);
-              console.log(`✅ Decompressed Scryfall NDJSON (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
-              resolve();
-            })
-            .on('error', reject);
-        });
+        await decompressGzip(scryfallGzPath, scryfallNdjsonPath, 'Scryfall NDJSON');
       } else {
         console.log('✅ Scryfall NDJSON exists');
       }
@@ -1167,7 +1275,7 @@ async function sync() {
 
     // Download and convert MTGJson (compressed .gz download, then decompress)
     try {
-      if (!fs.existsSync(mtgjsonGzPath)) {
+      if (!existsAndValid(mtgjsonGzPath)) {
         await downloadFile(MTGJSON_URL, mtgjsonGzPath, 'MTGJson (.gz)');
       } else {
         const stats = fs.statSync(mtgjsonGzPath);
@@ -1320,7 +1428,7 @@ async function sync() {
     let priceData = {};
     let pricesTotal = 0;
     try {
-      if (!fs.existsSync(pricesGzPath)) {
+      if (!existsAndValid(pricesGzPath)) {
         await downloadFile(MTGJSON_PRICES_URL, pricesGzPath, 'Prices (.gz)');
       } else {
         const stats = fs.statSync(pricesGzPath);
