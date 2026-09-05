@@ -1,8 +1,12 @@
 name: Sync Scryfall + MTGJson
 
 on:
+  # 21:43 UTC = 7:43 AM AEST. Scryfall regenerates bulk data ~21:00-21:15 UTC
+  # and MTGJSON files go live ~14:00 UTC, so both sources are guaranteed fresh.
+  # The :43 offset avoids GitHub Actions' cron peak load (top/half of the hour),
+  # which was delaying the previous 22:30 slot by 1.5-2h or dropping it entirely.
   schedule:
-    - cron: '30 22 * * *'
+    - cron: '43 21 * * *'
   workflow_dispatch:
 
 jobs:
@@ -50,7 +54,34 @@ jobs:
 
           # Force push to the data branch (rewriting history is fine — data snapshots)
           git push origin data --force
-
-      # The data-quality watchdog now runs via watchdog.yml (workflow_run trigger)
-      # the moment this workflow completes: its ntfy push then reports a manifest
-      # that JUST finished generating, and it still alerts when the sync fails.
+  notify:
+    # The daily ntfy push — deterministic, same workflow, no second scheduler,
+    # no workflow_run event bus (which has never fired for this repo).
+    # Runs immediately when the sync job finishes, success OR failure:
+    #   - Sync succeeded  -> watchdog checks the just-deployed manifest and
+    #                       pushes the "all clear" (NOTIFY_ALWAYS=1).
+    #   - Sync failed and deployed nothing -> the live manifest is yesterday's,
+    #                       so the Freshness check (MAX_AGE_HOURS=4) FAILS and
+    #                       a high-priority alert is pushed instead.
+    name: Watchdog notify (post-sync)
+    runs-on: ubuntu-latest
+    needs: [sync]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Run watchdog and push ntfy report
+        run: node scripts/watchdog.mjs
+        env:
+          # Cache-busted live URL (default) so the just-pushed manifest is
+          # fetched fresh, not a stale CDN copy.
+          WATCHDOG_MANIFEST_URL: ${{ secrets.WATCHDOG_MANIFEST_URL }}
+          WATCHDOG_WEBHOOK_URL: ${{ secrets.WATCHDOG_WEBHOOK_URL }}
+          WATCHDOG_NTFY_TOPIC: ${{ secrets.WATCHDOG_NTFY_TOPIC }}
+          WATCHDOG_NOTIFY_ALWAYS: '1'
+          # The sync just finished (or failed). A manifest older than 4h means
+          # this run did not build/deploy — must alert even though every other
+          # check still passes against yesterday's data.
+          WATCHDOG_MAX_AGE_HOURS: '4'

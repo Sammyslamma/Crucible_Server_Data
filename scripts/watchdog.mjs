@@ -39,6 +39,29 @@ const minCoverage = parseFloat(get('--min-coverage', 'WATCHDOG_MIN_COVERAGE', St
 const ntfyTopic = get('--ntfy-topic', 'WATCHDOG_NTFY_TOPIC', '');
 const notifyAlways = args.includes('--notify-always') || process.env.WATCHDOG_NOTIFY_ALWAYS === '1';
 
+// Build the ntfy.sh URL (a bare topic name is assumed to be ntfy.sh).
+function ntfyUrlFor(topic) {
+  return /^https?:\/\//i.test(topic) ? topic : `https://ntfy.sh/${topic}`;
+}
+
+// POST to ntfy with one retry for transient failures (429 rate-limit / 5xx),
+// so a single blip does not silently eat the daily notification.
+// Returns true when delivered, false otherwise.
+async function postNtfy(url, headers, body) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(url, { method: 'POST', headers, body });
+      if (res.ok) return true;
+      console.error(`ntfy FAILED ${res.status} (attempt ${attempt}): ${await res.text().catch(() => '')}`);
+      if (!(res.status === 429 || res.status >= 500)) return false; // permanent — don't retry
+    } catch (e) {
+      console.error(`ntfy error (attempt ${attempt}): ${e.message}`);
+    }
+    if (attempt < 2) await new Promise(r => setTimeout(r, 3000)); // brief backoff before retry
+  }
+  return false;
+}
+
 async function loadManifest(src) {
   if (/^https?:/i.test(src)) {
     // Cache-bust: raw.githubusercontent.com (and most CDNs) key the cache on the
@@ -75,7 +98,19 @@ await (async () => {
   try {
     m = await loadManifest(manifestSource);
   } catch (e) {
+    // A watchdog that cannot load the manifest at all is the WORST state —
+    // push a loud alert instead of failing silently with just a log line.
     console.error(`Cannot load manifest (${manifestSource}): ${e.message}`);
+    if (ntfyTopic) {
+      const sent = await postNtfy(ntfyUrlFor(ntfyTopic), {
+        'Title': 'Crucible Watchdog: cannot load manifest',
+        'Tags': 'rotating_light',
+        'Priority': 'high',
+      }, `Cannot load manifest (${manifestSource}): ${e.message}`);
+      console.log(sent ? 'ntfy sent' : 'ntfy not sent');
+    } else {
+      console.error('ntfy skipped: WATCHDOG_NTFY_TOPIC not set');
+    }
     process.exitCode = 2;
     return;
   }
@@ -200,39 +235,32 @@ await (async () => {
   }
 
   // --- ntfy push notification — fires on problems, or on success when notify-always is set ---
-  if (ntfyTopic && (problems.length > 0 || notifyAlways)) {
+  let ntfyFailed = false;
+  if (!ntfyTopic) {
+    // Make a missing/blank secret diagnosable instead of silently quiet.
+    console.error('ntfy skipped: WATCHDOG_NTFY_TOPIC not set');
+  } else if (problems.length > 0 || notifyAlways) {
     const ntfyPriority = problems.length > 0 ? 'high' : 'low';
     const ntfyTags = problems.length > 0 ? 'rotating_light' : 'white_check_mark';
     const ntfyTitle = allOk
       ? 'Crucible Watchdog: All Checks Passed'
       : `Crucible Watchdog: ${problems.length} problem(s) detected`;
 
-    const ntfyUrl = /^https?:\/\//i.test(ntfyTopic)
-      ? ntfyTopic
-      : `https://ntfy.sh/${ntfyTopic}`;
-
-    try {
-      const res = await fetch(ntfyUrl, {
-        method: 'POST',
-        headers: {
-          'Title': ntfyTitle,
-          'Tags': ntfyTags,
-          'Priority': ntfyPriority,
-        },
-        body,
-      });
-      if (!res.ok) {
-        // A silent notification failure is worse than a failed run — make it loud.
-        console.error(`ntfy FAILED ${res.status}: ${await res.text().catch(() => '')}`);
-        process.exitCode = 1;
-      } else {
-        console.log('ntfy sent');
-      }
-    } catch (e) {
-      console.error(`ntfy error: ${e.message}`);
-      process.exitCode = 1;
+    ntfyFailed = !(await postNtfy(ntfyUrlFor(ntfyTopic), {
+      'Title': ntfyTitle,
+      'Tags': ntfyTags,
+      'Priority': ntfyPriority,
+    }, body));
+    if (ntfyFailed) {
+      // A silent notification failure is worse than a failed run — make it loud.
+      console.error('ntfy not delivered after retries');
+    } else {
+      console.log('ntfy sent');
     }
   }
 
-  process.exitCode = problems.length > 0 ? 1 : 0;
+  // Exit 1 on data problems OR on a notification that failed to send — a green
+  // run must mean "checked AND notified", not just "checked". (This line was
+  // previously clobbering the ntfy failure code back to 0, hiding failed pushes.)
+  process.exitCode = (problems.length > 0 || ntfyFailed) ? 1 : 0;
 })();

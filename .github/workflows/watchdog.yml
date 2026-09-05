@@ -1,17 +1,15 @@
 name: Data Watchdog
 
 on:
-  # Primary trigger: fires the moment the sync workflow completes, so the daily
-  # ntfy push reports a manifest that JUST finished generating ("generated 5m
-  # ago"), not one that is about to be replaced by the next sync (~24h old).
-  workflow_run:
-    workflows: ["Sync Scryfall + MTGJson"]
-    types: [completed]
-  # Safety net: daily check even if the sync itself silently stops running.
-  # STALE alert (manifest older than max-age-hours) catches a dead sync.
-  # Quiet on success (see NOTIFY_ALWAYS below) so it does not double-push.
+  # Pure safety net: daily check that the sync itself is still alive.
+  # The DAILY ntfy push lives in sync.yml's "notify" job (runs right after the
+  # sync completes) — do not add NOTIFY_ALWAYS here or you will double-push.
+  # STALE alert (manifest older than max-age-hours) catches a sync that stopped
+  # running entirely; on all-checks-pass this job stays SILENT (NOTIFY_ALWAYS=0).
+  # 23:23 UTC = 9:23 AM AEST, ~1.5h after the sync normally completes, on an
+  # off-peak minute (avoids the cron queue congestion of top/half-hour slots).
   schedule:
-    - cron: '15 23 * * *'
+    - cron: '23 23 * * *'
   workflow_dispatch:
 
 jobs:
@@ -28,12 +26,10 @@ jobs:
           WATCHDOG_MANIFEST_URL: ${{ secrets.WATCHDOG_MANIFEST_URL }}
           WATCHDOG_WEBHOOK_URL: ${{ secrets.WATCHDOG_WEBHOOK_URL }}
           WATCHDOG_NTFY_TOPIC: ${{ secrets.WATCHDOG_NTFY_TOPIC }}
-          # Post-sync (workflow_run) and manual runs: always push, so the daily
-          # "all clear" arrives with a just-generated manifest. The safety-net
-          # cron pushes only when something is actually wrong - no redundant
-          # ~24h-old "all clear" every day.
+          # Scheduled safety net pushes only when something is actually wrong
+          # (the daily "all clear" belongs to sync.yml's notify job). Manual
+          # dispatch runs always push, for testing the notification path.
           WATCHDOG_NOTIFY_ALWAYS: ${{ github.event_name == 'schedule' && '0' || '1' }}
-          # On the post-sync trigger the manifest was just written, so anything
-          # older than 4h means THIS sync failed to build/deploy and must alert
-          # even though every other check still passes against yesterday's data.
-          WATCHDOG_MAX_AGE_HOURS: ${{ github.event_name == 'workflow_run' && '4' || '36' }}
+          # If the daily sync stopped running entirely, this morning-after check
+          # is what notices: manifest older than 36h => STALE => alert.
+          WATCHDOG_MAX_AGE_HOURS: '36'
