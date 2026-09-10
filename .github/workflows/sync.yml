@@ -72,16 +72,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '18'
+      # Read the manifest straight out of the just-pushed data branch via git.
+      # Do NOT fetch it over HTTP. The raw.githubusercontent CDN ignores the
+      # query string in its cache key (the old ?_cb= cache-buster was a no-op)
+      # and served the PREVIOUS day manifest to this job, reporting ~24h old
+      # right after a successful deploy. git show always returns the exact
+      # bytes pushed seconds earlier by the sync job.
+      - name: Read just-deployed manifest from data branch
+        run: |
+          git fetch origin data --depth 1
+          git show origin/data:manifest.json > manifest.json
+          git log -1 --oneline origin/data
       - name: Run watchdog and push ntfy report
         run: node scripts/watchdog.mjs
         env:
-          # Cache-busted live URL (default) so the just-pushed manifest is
-          # fetched fresh, not a stale CDN copy.
-          WATCHDOG_MANIFEST_URL: ${{ secrets.WATCHDOG_MANIFEST_URL }}
+          # Local file = the exact manifest bytes the sync job just deployed.
+          WATCHDOG_MANIFEST_URL: ./manifest.json
           WATCHDOG_WEBHOOK_URL: ${{ secrets.WATCHDOG_WEBHOOK_URL }}
           WATCHDOG_NTFY_TOPIC: ${{ secrets.WATCHDOG_NTFY_TOPIC }}
-          WATCHDOG_NOTIFY_ALWAYS: '1'
+          WATCHDOG_NOTIFY_ALWAYS: 1
           # The sync just finished (or failed). A manifest older than 4h means
           # this run did not build/deploy — must alert even though every other
           # check still passes against yesterday's data.
-          WATCHDOG_MAX_AGE_HOURS: '4'
+          WATCHDOG_MAX_AGE_HOURS: 4
