@@ -802,7 +802,7 @@ function projectLightCard(card) {
       if (f && typeof f === 'object') {
         out.push({
           name: f.name || null,
-          image_uris: copyMap(f.image_uris, ['normal']),
+          image_uris: copyMap(f.image_uris, ['large']),
           mana_cost: f.mana_cost || null,
           type_line: f.type_line || null,
           colors: f.colors || null,
@@ -831,8 +831,10 @@ function projectLightCard(card) {
     return Object.keys(out).length > 0 ? out : null;
   };
 
+  // Image variant projected into the index. Must stay in sync with the app's
+  // kCardImageVariant constant (lib/models.dart) — currently 'large'.
   return {
-    image_uris: copyMap(card.image_uris, ['normal']),
+    image_uris: copyMap(card.image_uris, ['large']),
     card_faces: copyFaceList(card.card_faces),
     layout: card.layout || null,
     mana_cost: card.mana_cost || null,
