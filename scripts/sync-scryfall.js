@@ -78,11 +78,23 @@ const CLEANUP_PRICES_TEMP = 1;       // prices_temp.json
 const CLEANUP_MANAPOOL_TEMP = 1;     // manapool_temp.json
 const CLEANUP_CARDKINGDOM_TEMP = 1;  // cardkingdom_temp.json
 
+// Tagger community tags (Scryfall "oracle_tags" + "art_tags" bulk files).
+// Both are joined against the Scryfall card data (via oracle_id /
+// illustration_id) and fanned out into scryfall_id-keyed label arrays:
+//   oracle_tags.json.gz / art_tags.json.gz — { "<scryfall_id>": ["label", ...] }
+// A failure here only costs the tag files; cards/prices/links are unaffected.
+const TAGS_ENABLED = 1;              // Set 0 to skip the tag build entirely
+const CLEANUP_ORACLE_TAGS_GZ = 1;    // oracle_tags_raw.json.gz (upstream download)
+const CLEANUP_ART_TAGS_GZ = 1;       // art_tags_raw.json.gz (upstream download)
+
 /**
- * Fetch the actual Scryfall download URL from metadata
+ * Query Scryfall's /bulk-data metadata once and resolve every download URL
+ * this pipeline consumes: the default_cards card file plus the two Tagger
+ * tag files (oracle_tags / art_tags). Tag entries are optional — if Scryfall
+ * omits one, only that tag file is skipped, never the whole sync.
  */
-async function getScryfallDownloadUrl() {
-  console.log('📋 Fetching Scryfall metadata...');
+async function getScryfallBulkDataUrls() {
+  console.log('📋 Fetching Scryfall bulk-data metadata...');
   // Retried like the downloads — this is the first network call of the run,
   // and a transient blip here would abort before any download even starts.
   const response = await withRetry(async () => {
@@ -102,14 +114,25 @@ async function getScryfallDownloadUrl() {
   if (!defaultCards) {
     throw new Error('default_cards bulk data not found in Scryfall metadata');
   }
-  // Scryfall now serves .jsonl.gz files (gzipped NDJSON).
+  // Scryfall now serves .jsonl.gz files (gzipped NDJSON / gzipped JSON).
   // Use jsonl_download_uri; fall back to download_uri if present.
   const downloadUrl = defaultCards.jsonl_download_uri || defaultCards.download_uri;
   if (!downloadUrl) {
     throw new Error('No download URL found in Scryfall metadata');
   }
-  console.log(`✅ Got Scryfall download URL`);
-  return downloadUrl;
+  const tagEntry = (type) => {
+    const entry = data.data.find(item => item.type === type);
+    if (!entry) return null;
+    const uri = entry.jsonl_download_uri || entry.download_uri;
+    if (!uri) return null;
+    return { downloadUrl: uri, updatedAt: entry.updated_at || null };
+  };
+  console.log('✅ Got Scryfall bulk-data download URLs');
+  return {
+    defaultCardsUrl: downloadUrl,
+    oracleTags: tagEntry('oracle_tags'),
+    artTags: tagEntry('art_tags'),
+  };
 }
 
 /**
@@ -1172,6 +1195,89 @@ function buildCardKingdomData(ckByScryfallId, priceDate) {
 }
 
 /**
+ * Parse one of Scryfall's Tagger tag bulk files (oracle_tags / art_tags).
+ * Per the Tags docs the payload is a JSON ARRAY of tag objects, each carrying
+ * a `taggings` array that joins the tag to cards by oracle_id (oracle tags)
+ * or illustration_id (art tags) — never by scryfall_id. The files are small
+ * (5-13 MB compressed / 18-40 MB raw), so a whole-file parse is safe here.
+ * Both array and JSONL shapes are accepted defensively.
+ */
+function parseTagBulkFile(gzPath, name) {
+  console.log(`📖 Parsing ${name} tag file...`);
+  const txt = zlib.gunzipSync(fs.readFileSync(gzPath)).toString('utf8');
+  const trimmed = txt.trim();
+  if (trimmed.startsWith('[')) return JSON.parse(trimmed);
+  const out = [];
+  for (const line of trimmed.split(/\r?\n/)) {
+    const s = line.trim();
+    if (!s) continue;
+    out.push(JSON.parse(s));
+  }
+  return out;
+}
+
+/**
+ * Invert a parsed tag file into key -> sorted unique label arrays.
+ * keyField is 'oracle_id' for the oracle file and 'illustration_id' for the
+ * art file. Only the display `label` is kept — slug/uri/description/hierarchy
+ * are intentionally dropped to keep the shipped files as small as possible
+ * (the app's role buckets are curated app-side; see docs/tag-vocabulary.md).
+ */
+function invertTagObjects(tagObjects, keyField, name) {
+  const byKey = new Map();
+  let labels = 0;
+  let taggings = 0;
+  for (const tag of tagObjects) {
+    if (!tag || typeof tag !== 'object' || !tag.label) continue;
+    labels++;
+    const list = Array.isArray(tag.taggings) ? tag.taggings : [];
+    for (const g of list) {
+      const key = g ? g[keyField] : null;
+      if (!key) continue;
+      taggings++;
+      let set = byKey.get(key);
+      if (!set) {
+        set = new Set();
+        byKey.set(key, set);
+      }
+      set.add(tag.label);
+    }
+  }
+  const out = new Map();
+  for (const [key, set] of byKey) {
+    out.set(key, [...set].sort());
+  }
+  console.log(`   ${name}: ${labels} labels, ${taggings} taggings -> ${out.size} unique ${keyField}s`);
+  return out;
+}
+
+/**
+ * Fan the inverted tag maps out to per-printing entries keyed by scryfall_id
+ * (the key the app's light/price indexes already use — no app-side model
+ * changes needed). Every printing of the same oracle shares its oracle tags;
+ * every printing of the same artwork shares its art tags.
+ */
+function fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId) {
+  const oracleTags = {};
+  const artTags = {};
+  let oracleCards = 0;
+  let artCards = 0;
+  for (const [scryfallId, card] of Object.entries(scryfallCards)) {
+    const oracleLabels = card.oracle_id ? oracleByOracleId.get(card.oracle_id) : null;
+    if (oracleLabels && oracleLabels.length > 0) {
+      oracleTags[scryfallId] = oracleLabels;
+      oracleCards++;
+    }
+    const artLabels = card.illustration_id ? artByIllustrationId.get(card.illustration_id) : null;
+    if (artLabels && artLabels.length > 0) {
+      artTags[scryfallId] = artLabels;
+      artCards++;
+    }
+  }
+  return { oracleTags, artTags, oracleCards, artCards };
+}
+
+/**
  * Write a JSON file and compress it to .gz
  */
 async function writeAndCompressJson(data, outputPath, gzPath, name) {
@@ -1221,6 +1327,8 @@ async function sync() {
       mtgjsonPrices: { ok: false, entries: 0 },
       manapool:      { ok: false, inStock: 0, linked: 0 },
       cardkingdom:   { ok: false, products: 0, uniqueIds: 0, priced: 0 },
+      oracleTags:    { ok: false, cards: 0 },
+      artTags:       { ok: false, cards: 0 },
     };
 
     // Scryfall now serves .jsonl.gz files (gzipped NDJSON)
@@ -1233,6 +1341,8 @@ async function sync() {
     const pricesPath = path.join(OUTPUT_DIR, 'prices_temp.json');
     const manapoolPath = path.join(OUTPUT_DIR, 'manapool_temp.json');
     const cardkingdomPath = path.join(OUTPUT_DIR, 'cardkingdom_temp.json');
+    const oracleTagsRawGzPath = path.join(OUTPUT_DIR, 'oracle_tags_raw.json.gz');
+    const artTagsRawGzPath = path.join(OUTPUT_DIR, 'art_tags_raw.json.gz');
 
     // Resume guard for downloadable sources: a 0-byte leftover from a run that
     // died before writing anything is treated as absent so the source is
@@ -1250,11 +1360,21 @@ async function sync() {
       return fs.existsSync(filePath);
     };
 
+    // Resolve every bulk-data download URL in one metadata call up front so
+    // the tag build later never needs a second metadata round-trip.
+    let bulkUrls = null;
+    try {
+      bulkUrls = await getScryfallBulkDataUrls();
+    } catch (err) {
+      console.error(`⚠️ Scryfall bulk-data metadata failed (${err.message})`);
+      warnings.push(`Scryfall metadata resolution failed: ${err.message}`);
+    }
+
     // Download Scryfall (.jsonl.gz - gzipped NDJSON)
     try {
       if (!existsAndValid(scryfallGzPath)) {
-        const downloadUrl = await getScryfallDownloadUrl();
-        await downloadFile(downloadUrl, scryfallGzPath, 'Scryfall');
+        if (!bulkUrls) throw new Error('bulk-data metadata unavailable');
+        await downloadFile(bulkUrls.defaultCardsUrl, scryfallGzPath, 'Scryfall');
       } else {
         const stats = fs.statSync(scryfallGzPath);
         console.log(`✅ Scryfall source exists (${(stats.size / 1024 / 1024).toFixed(0)}MB)`);
@@ -1407,6 +1527,75 @@ async function sync() {
 
     if (ckUniqueIds > 0 && Object.keys(ckPriceMap).length === 0) {
       warnings.push('Card Kingdom parsed listings but produced 0 priced cards — price fields may have changed');
+    }
+
+    // ── Tagger community tags (Scryfall oracle_tags + art_tags bulk files) ─
+    // Upstream, tags join cards by oracle_id (gameplay tags) or
+    // illustration_id (art tags). Here they are inverted to key -> labels and
+    // fanned out to per-printing entries keyed by scryfall_id. Each file is
+    // built independently so one failing only costs that file.
+    let tagOutput = null;
+    let oracleTagUpdatedAt = null;
+    let artTagUpdatedAt = null;
+    if (TAGS_ENABLED) {
+      let oracleByOracleId = null;
+      let artByIllustrationId = null;
+
+      if (!bulkUrls) {
+        console.error('⚠️ Tag build skipped — Scryfall bulk-data metadata unavailable');
+        warnings.push('Tagger tags skipped: Scryfall bulk-data metadata unavailable');
+      }
+      if (bulkUrls && bulkUrls.oracleTags) {
+        try {
+          if (!existsAndValid(oracleTagsRawGzPath)) {
+            await downloadFile(bulkUrls.oracleTags.downloadUrl, oracleTagsRawGzPath, 'Oracle Tags');
+          } else {
+            console.log('✅ Oracle Tags source exists');
+          }
+          oracleByOracleId = invertTagObjects(parseTagBulkFile(oracleTagsRawGzPath, 'oracle'), 'oracle_id', 'oracle tags');
+          oracleTagUpdatedAt = bulkUrls.oracleTags.updatedAt;
+          sources.oracleTags.ok = true;
+        } catch (err) {
+          console.error(`⚠️ Oracle tags build failed (${err.message}) — continuing without them`);
+          warnings.push(`Oracle tags build failed: ${err.message}`);
+        }
+      } else if (bulkUrls) {
+        console.error('⚠️ No oracle_tags entry in Scryfall bulk-data metadata — continuing without them');
+        warnings.push('No oracle_tags entry in Scryfall bulk-data metadata');
+      }
+
+      if (bulkUrls && bulkUrls.artTags) {
+        try {
+          if (!existsAndValid(artTagsRawGzPath)) {
+            await downloadFile(bulkUrls.artTags.downloadUrl, artTagsRawGzPath, 'Art Tags');
+          } else {
+            console.log('✅ Art Tags source exists');
+          }
+          artByIllustrationId = invertTagObjects(parseTagBulkFile(artTagsRawGzPath, 'art'), 'illustration_id', 'art tags');
+          artTagUpdatedAt = bulkUrls.artTags.updatedAt;
+          sources.artTags.ok = true;
+        } catch (err) {
+          console.error(`⚠️ Art tags build failed (${err.message}) — continuing without them`);
+          warnings.push(`Art tags build failed: ${err.message}`);
+        }
+      } else if (bulkUrls) {
+        console.error('⚠️ No art_tags entry in Scryfall bulk-data metadata — continuing without them');
+        warnings.push('No art_tags entry in Scryfall bulk-data metadata');
+      }
+
+      if (oracleByOracleId || artByIllustrationId) {
+        if (Object.keys(scryfallCards).length === 0) {
+          console.error('⚠️ Scryfall card data unavailable — tags cannot be joined to scryfall_ids');
+          warnings.push('Tagger tags skipped: Scryfall card data unavailable for the join');
+        } else {
+          tagOutput = fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId);
+          sources.oracleTags.cards = tagOutput.oracleCards;
+          sources.artTags.cards = tagOutput.artCards;
+          console.log(`🏷️  Tags joined: ${tagOutput.oracleCards} printings with oracle tags, ${tagOutput.artCards} with art tags`);
+        }
+      }
+    } else {
+      console.log('⏭️  Tags disabled — skipping');
     }
 
     // Build light index with token parts and UUID
@@ -1598,6 +1787,25 @@ async function sync() {
     const lightPriceIndexTempPath = path.join(OUTPUT_DIR, 'light_price_index_temp.json');
     await writeAndCompressJson(extractedPrices, lightPriceIndexTempPath, lightPriceIndexGzPath, 'light_price_index.json.gz');
 
+    // Tag indexes: scryfall_id -> sorted unique label arrays. Bare maps — the
+    // smallest possible shape; freshness metadata lives in manifest.json.
+    let oracleTagsWritten = 0;
+    let artTagsWritten = 0;
+    if (tagOutput) {
+      if (tagOutput.oracleTags && Object.keys(tagOutput.oracleTags).length > 0) {
+        const oracleTagsGzPath = path.join(OUTPUT_DIR, 'oracle_tags.json.gz');
+        const oracleTagsTempPath = path.join(OUTPUT_DIR, 'oracle_tags_temp.json');
+        await writeAndCompressJson(tagOutput.oracleTags, oracleTagsTempPath, oracleTagsGzPath, 'oracle_tags.json.gz');
+        oracleTagsWritten = Object.keys(tagOutput.oracleTags).length;
+      }
+      if (tagOutput.artTags && Object.keys(tagOutput.artTags).length > 0) {
+        const artTagsGzPath = path.join(OUTPUT_DIR, 'art_tags.json.gz');
+        const artTagsTempPath = path.join(OUTPUT_DIR, 'art_tags_temp.json');
+        await writeAndCompressJson(tagOutput.artTags, artTagsTempPath, artTagsGzPath, 'art_tags.json.gz');
+        artTagsWritten = Object.keys(tagOutput.artTags).length;
+      }
+    }
+
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
 
@@ -1679,6 +1887,10 @@ async function sync() {
         sealedSkipped: ckSkipped,
         updatedAt: ckUpdatedAt,
       },
+      tags: {
+        oracle: { cards: oracleTagsWritten, updatedAt: oracleTagUpdatedAt },
+        art: { cards: artTagsWritten, updatedAt: artTagUpdatedAt },
+      },
       ...(warnings.length > 0 ? { warnings } : {}),
     };
 
@@ -1696,6 +1908,8 @@ async function sync() {
       { path: pricesPath, name: 'prices_temp.json', flag: CLEANUP_PRICES_TEMP },
       { path: manapoolPath, name: 'manapool_temp.json', flag: CLEANUP_MANAPOOL_TEMP },
       { path: cardkingdomPath, name: 'cardkingdom_temp.json', flag: CLEANUP_CARDKINGDOM_TEMP },
+      { path: oracleTagsRawGzPath, name: 'oracle_tags_raw.json.gz', flag: CLEANUP_ORACLE_TAGS_GZ },
+      { path: artTagsRawGzPath, name: 'art_tags_raw.json.gz', flag: CLEANUP_ART_TAGS_GZ },
     ];
     for (const file of tempFiles) {
       if (!file.flag) {
@@ -1724,6 +1938,8 @@ async function sync() {
     console.log(`   - Cards in light_price_index: ${Object.keys(extractedPrices).length}`);
     console.log(`   - Total price entries available: ${pricesTotal}`);
     console.log(`   - ManaPool purchase URLs: ${manapoolLinked} cards linked (${Object.keys(manapoolByScryfallId).length} in stock from API)`);
+    console.log(`   - Oracle tags: ${oracleTagsWritten} printings tagged`);
+    console.log(`   - Art tags: ${artTagsWritten} printings tagged`);
     console.log(`   - Card Kingdom: ${ckUniqueIds} scryfall IDs, ${ckPricedCards} priced, ${ckLinked} purchase URLs linked (${ckFoilLinked} foil), ${ckSkipped} non-card entries skipped`);
   } catch (error) {
     console.error('❌ Error during sync:');

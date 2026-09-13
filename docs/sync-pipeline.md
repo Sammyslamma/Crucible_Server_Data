@@ -11,9 +11,10 @@ The sync runs daily (scheduled GitHub Actions workflow). It:
 1. Downloads card data from **Scryfall** and **MTGJSON**.
 2. Merges them into a *light card index* (`light_index.json.gz`) with exact purchase links.
 3. Pulls prices for every configured store, walking a **per-store source chain** with automatic fallbacks and a **last-known-good carry-over** guard.
-4. Writes `light_price_index.json.gz`, `manifest.json`, and pushes them to the `data` branch.
+4. Builds the **Tagger community tag files** (`oracle_tags.json.gz` / `art_tags.json.gz`) from Scryfall's bulk data, joined to printings by Scryfall ID.
+5. Writes `light_price_index.json.gz`, `manifest.json`, and pushes them to the `data` branch.
 
-The app then downloads those two files. The pipeline is a *daily snapshot* — it keeps the latest prices per store, not historical series.
+The app then downloads those files. The pipeline is a *daily snapshot* — it keeps the latest prices per store, not historical series.
 
 ### Output files (on the `data` branch)
 
@@ -21,6 +22,8 @@ The app then downloads those two files. The pipeline is a *daily snapshot* — i
 |---|---|
 | `light_index.json.gz` | Per-card light data: faces, images, type, legalities, `purchaseUris` (exact links only) |
 | `light_price_index.json.gz` | Per-card prices keyed by Scryfall ID: `{ retail: { normal/foil/etched: { date: price } }, currency }` per store |
+| `oracle_tags.json.gz` | Tagger **gameplay tags** keyed by Scryfall ID: `{ "<scryfall_id>": ["label", ...] }` (labels only, sorted) |
+| `art_tags.json.gz` | Tagger **artwork tags** keyed by Scryfall ID, same shape |
 | `manifest.json` | Sync metadata, source health, per-vendor pricing attribution, warnings (consumed by the watchdog) |
 
 ---
@@ -30,6 +33,7 @@ The app then downloads those two files. The pipeline is a *daily snapshot* — i
 | Source | What it provides | Used for |
 |---|---|---|
 | **Scryfall** bulk data | Card objects, faces, `purchase_uris`, and its own `prices` (usd/eur per finish) | Card index, **exact links** (primary for TCGplayer, secondary for Cardmarket), **secondary prices** for tcgplayer/cardmarket |
+| **Scryfall** Tagger bulk files | `oracle_tags` (gameplay tags, joined by `oracle_id`) and `art_tags` (artwork tags, joined by `illustration_id`) | **Tag files** for the app (card detail tags, deck stats / role designations, themed decks) |
 | **MTGJSON** `AllPrintings` | MTGJSON UUID → Scryfall ID mapping, `identifiers` (tcgplayerProductId, cardmarketId) | UUID mapping, vendor product IDs for exact URLs, token parts |
 | **MTGJSON** `AllPricesToday` | Dated per-vendor, per-finish retail prices | **Primary prices** for tcgplayer/cardmarket + fallback for CK; manapool price source |
 | **Card Kingdom live API** | Pricelist with `scryfall_id`, retail/buy prices, exact product URLs | **Primary price + link** for cardkingdom |
@@ -75,7 +79,7 @@ Each store independently resolves its prices and its links. **The first source i
 - **`sync()`** — orchestrates the whole run: downloads, loads, merges, prices (chains + carry-over), writes outputs, cleans up. Owns the `warnings` array and `sources` health tracker that land in `manifest.json`.
 
 ### Download / parse
-- **`getScryfallDownloadUrl()`** — queries Scryfall's `/bulk-data` metadata to resolve the actual download URL.
+- **`getScryfallBulkDataUrls()`** — queries Scryfall's `/bulk-data` metadata once and resolves every download URL the pipeline consumes: `default_cards` plus the two Tagger tag files (`oracle_tags`, `art_tags`).
 - **`downloadFile(url, path, name)`** — HTTP download with progress logging. On failure, `sources.*.ok` is set false (doesn't abort the sync).
 - **`decompressGzip(in, out, name)`** — gunzips an MTGJSON `.json.gz` to a temp JSON file.
 - **`convertMtgJsonToNdjson()`** — converts the large `AllPrintings.json` into NDJSON for streaming.
@@ -100,7 +104,9 @@ Each store independently resolves its prices and its links. **The first source i
     "mtgjson": {"ok":true,"cards":38185},
     "mtgjsonPrices": {"ok":true,"entries":108590},
     "manapool": {"ok":true,"inStock":99783,"linked":99783},
-    "cardkingdom": {"ok":true,"uniqueIds":97615,"priced":97596,"linked":97596}
+    "cardkingdom": {"ok":true,"uniqueIds":97615,"priced":97596,"linked":97596},
+    "oracleTags": {"ok":true,"cards":113787},
+    "artTags": {"ok":true,"cards":112820}
   },
   "pricing": {
     "vendors": {
@@ -110,6 +116,10 @@ Each store independently resolves its prices and its links. **The first source i
       "manapool":   { "primary": "manapool-api", "carriedOver": 0, "priced": 98622 }
     },
     "carriedOver": []
+  },
+  "tags": {
+    "oracle": { "cards": 113787, "updatedAt": "2026-09-12T09:00:31.531+00:00" },
+    "art":    { "cards": 112820, "updatedAt": "2026-09-12T09:01:13.577+00:00" }
   },
   "warnings": ["..."]   // only present when non-empty
 }
@@ -147,6 +157,7 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 | Scryfall down | MTGJSON covers prices; links fall to MTGJSON IDs / vendor APIs |
 | CK API down | MTGJSON prices; CK links → dash (structural) |
 | ManaPool API down | MTGJSON prices; MP links → dash |
+| Scryfall Tagger tag file fails | That tag file is skipped (the other tag file is unaffected); warning + watchdog alert; cards/prices/links unaffected |
 | Everything fails for a store | Previous run's prices republished (stale, labeled) + watchdog alert |
 | Store changes URL format (regression) | Exactness check / stub-drop rate >25% → warning + watchdog fail |
 
@@ -166,6 +177,12 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 - **`fetchCardKingdomSingles()`** — downloads the CK pricelist and stream-parses it.
 - **`parseCardKingdomFile()`** — the actual CK stream parser; split out so it can be driven against a local file offline.
 
+### Tagger tags
+- **`parseTagBulkFile(gzPath, name)`** — parses a Tagger tag bulk file (a gzipped JSON array of tag objects; JSONL accepted defensively).
+- **`invertTagObjects(tagObjects, keyField, name)`** — inverts `tag → taggings` into `oracle_id` / `illustration_id` → sorted unique labels. Label-only output by design: slug/uri/description/hierarchy are dropped to keep the files small (the full vocabulary with counts and parents lives in `docs/tag-vocabulary.md`; role buckets are curated app-side).
+- **`fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId)`** — joins the inverted maps against the Scryfall card data and produces per-printing entries keyed by `scryfall_id` (every printing of an oracle shares its oracle tags; every printing of an artwork shares its art tags).
+- Wiring lives inline in `sync()`: each tag file is downloaded/parsed/inverted independently (one failing only costs that file), then fanned out and written as `oracle_tags.json.gz` / `art_tags.json.gz`. Upstream, tags never reference `scryfall_id` — the join is the point of this step.
+
 ---
 
 ## 5. Key constants (configuration)
@@ -179,5 +196,6 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 | `MANAPOOL_ENABLED`, `MANAPOOL_PRICES_URL` | ManaPool on/off + API endpoint |
 | `CARDKINGDOM_ENABLED`, `CARDKINGDOM_SINGLES_URL` | Card Kingdom on/off + API endpoint |
 | `CK_LIVEPRICES_PREFER_API` | Prefer live CK prices over MTGJSON's cardkingdom feed |
+| `TAGS_ENABLED` | Master switch for the Tagger tag build (`0` = skip the oracle/art tag files entirely) |
 | `STORE_HOME_URLS` | Per-store homepage fallbacks written into `manifest.json` |
 | `CLEANUP_*` | Per-file temp cleanup flags (1 = delete, 0 = keep) |
