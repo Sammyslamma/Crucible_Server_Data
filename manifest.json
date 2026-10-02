@@ -1,0 +1,93 @@
+{
+  "version": "2026-10-02",
+  "generatedAt": "2026-10-02T21:47:37.906Z",
+  "lightIndexCards": 118467,
+  "pricesCards": 105084,
+  "pricesTotal": 112594,
+  "sources": {
+    "scryfall": {
+      "ok": true,
+      "cards": 118467
+    },
+    "mtgjson": {
+      "ok": true,
+      "cards": 38259
+    },
+    "mtgjsonPrices": {
+      "ok": true,
+      "entries": 112594
+    },
+    "manapool": {
+      "ok": true,
+      "inStock": 101219,
+      "linked": 101219
+    },
+    "cardkingdom": {
+      "ok": true,
+      "products": 151896,
+      "uniqueIds": 99139,
+      "priced": 99120,
+      "linked": 99120
+    }
+  },
+  "pricing": {
+    "vendors": {
+      "tcgplayer": {
+        "primary": "mtgjson",
+        "mtgjson": 0,
+        "scryfall": 979,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 99966
+      },
+      "cardmarket": {
+        "primary": "mtgjson",
+        "mtgjson": 0,
+        "scryfall": 16,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 99799
+      },
+      "cardkingdom": {
+        "primary": "cardkingdom-api",
+        "mtgjson": 0,
+        "scryfall": 0,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 99120
+      },
+      "manapool": {
+        "primary": "manapool-api",
+        "mtgjson": 0,
+        "scryfall": 0,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 100105
+      }
+    },
+    "carriedOver": []
+  },
+  "storeHomeUrls": {
+    "tcgplayer": "https://www.tcgplayer.com",
+    "cardmarket": "https://www.cardmarket.com",
+    "cardkingdom": "https://www.cardkingdom.com",
+    "manapool": "https://manapool.com"
+  },
+  "manapool": {
+    "inStockFromApi": 101219,
+    "linkedInLightIndex": 101219
+  },
+  "cardkingdom": {
+    "productsParsed": 151896,
+    "uniqueScryfallIds": 99139,
+    "linkedInLightIndex": 99120,
+    "foilLinkedInLightIndex": 63503,
+    "pricedCards": 99120,
+    "sealedSkipped": 281,
+    "updatedAt": "2026-10-02 14:08:00"
+  }
+}
