@@ -881,6 +881,7 @@ function projectLightCard(card) {
     set_name: card.set_name || null,
     collector_number: card.collector_number || null,
     rarity: card.rarity || null,
+    promo_types: card.promo_types || null,
   };
 }
 
