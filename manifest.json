@@ -1,0 +1,111 @@
+{
+  "version": "2026-10-10",
+  "generatedAt": "2026-10-10T21:49:11.958Z",
+  "lightIndexCards": 118624,
+  "pricesCards": 105211,
+  "pricesTotal": 112684,
+  "sources": {
+    "scryfall": {
+      "ok": true,
+      "cards": 118624
+    },
+    "mtgjson": {
+      "ok": true,
+      "cards": 38262
+    },
+    "mtgjsonPrices": {
+      "ok": true,
+      "entries": 112684
+    },
+    "manapool": {
+      "ok": true,
+      "inStock": 101250,
+      "linked": 101250
+    },
+    "cardkingdom": {
+      "ok": true,
+      "products": 152195,
+      "uniqueIds": 99289,
+      "priced": 99270,
+      "linked": 99270
+    },
+    "oracleTags": {
+      "ok": true,
+      "cards": 114466
+    },
+    "artTags": {
+      "ok": true,
+      "cards": 113622
+    }
+  },
+  "pricing": {
+    "vendors": {
+      "tcgplayer": {
+        "primary": "mtgjson",
+        "mtgjson": 0,
+        "scryfall": 942,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 100049
+      },
+      "cardmarket": {
+        "primary": "mtgjson",
+        "mtgjson": 0,
+        "scryfall": 11,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 99897
+      },
+      "cardkingdom": {
+        "primary": "cardkingdom-api",
+        "mtgjson": 0,
+        "scryfall": 0,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 99270
+      },
+      "manapool": {
+        "primary": "manapool-api",
+        "mtgjson": 0,
+        "scryfall": 0,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 100227
+      }
+    },
+    "carriedOver": []
+  },
+  "storeHomeUrls": {
+    "tcgplayer": "https://www.tcgplayer.com",
+    "cardmarket": "https://www.cardmarket.com",
+    "cardkingdom": "https://www.cardkingdom.com",
+    "manapool": "https://manapool.com"
+  },
+  "manapool": {
+    "inStockFromApi": 101250,
+    "linkedInLightIndex": 101250
+  },
+  "cardkingdom": {
+    "productsParsed": 152195,
+    "uniqueScryfallIds": 99289,
+    "linkedInLightIndex": 99270,
+    "foilLinkedInLightIndex": 63653,
+    "pricedCards": 99270,
+    "sealedSkipped": 69,
+    "updatedAt": "2026-10-10 14:08:17"
+  },
+  "tags": {
+    "oracle": {
+      "cards": 114466,
+      "updatedAt": "2026-10-10T21:00:37.906+00:00"
+    },
+    "art": {
+      "cards": 113622,
+      "updatedAt": "2026-10-10T21:01:21.181+00:00"
+    }
+  }
+}
