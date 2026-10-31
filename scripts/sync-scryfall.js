@@ -80,8 +80,10 @@ const CLEANUP_CARDKINGDOM_TEMP = 1;  // cardkingdom_temp.json
 
 // Tagger community tags (Scryfall "oracle_tags" + "art_tags" bulk files).
 // Both are joined against the Scryfall card data (via oracle_id /
-// illustration_id) and fanned out into scryfall_id-keyed label arrays:
-//   oracle_tags.json.gz / art_tags.json.gz — { "<scryfall_id>": ["label", ...] }
+// illustration_id) and fanned out into scryfall_id-keyed label arrays.
+// Inherited (parent-hierarchy) tags are resolved from each tag's parent_ids
+// and included alongside direct tags. Combined into a single output file:
+//   light_tags.json.gz — { "<scryfall_id>": { art_tags: [...], inherited_art_tags: [...], oracle_tags: [...] } }
 // A failure here only costs the tag files; cards/prices/links are unaffected.
 const TAGS_ENABLED = 1;              // Set 0 to skip the tag build entirely
 const CLEANUP_ORACLE_TAGS_GZ = 1;    // oracle_tags_raw.json.gz (upstream download)
@@ -1253,29 +1255,109 @@ function invertTagObjects(tagObjects, keyField, name) {
 }
 
 /**
+ * Resolve inherited (ancestor) tags through the tag hierarchy.
+ *
+ * Each tag object carries `parent_ids` (tag IDs) and `taggings` that join the
+ * tag to cards by oracle_id (oracle tags) or illustration_id (art tags). If a
+ * card is tagged with a child tag, it inherits every ancestor label up the
+ * hierarchy (e.g. a card tagged "stormy sky" also inherits "sky" and "weather").
+ *
+ * Returns a Map: key (oracle_id / illustration_id) -> sorted unique label array
+ * containing direct labels + all inherited ancestor labels.
+ */
+function resolveInheritedTags(tagObjects, keyField, name) {
+  // Build tag id -> tag object lookup for O(1) parent resolution
+  const tagIdToTag = new Map();
+  for (const tag of tagObjects) {
+    if (tag && tag.id) tagIdToTag.set(tag.id, tag);
+  }
+
+  // Resolve all ancestor labels for a given tag id (recursive, cycle-safe)
+  const ancestorCache = new Map();
+  function getAncestorLabels(tagId, visited = new Set()) {
+    if (ancestorCache.has(tagId)) return ancestorCache.get(tagId);
+    if (visited.has(tagId)) return new Set(); // cycle guard
+    visited.add(tagId);
+
+    const tag = tagIdToTag.get(tagId);
+    if (!tag) return new Set();
+
+    const ancestors = new Set();
+    for (const parentId of tag.parent_ids || []) {
+      const parentTag = tagIdToTag.get(parentId);
+      if (parentTag && parentTag.label) {
+        ancestors.add(parentTag.label);
+        for (const al of getAncestorLabels(parentId, visited)) {
+          ancestors.add(al);
+        }
+      }
+    }
+
+    ancestorCache.set(tagId, ancestors);
+    return ancestors;
+  }
+
+  // Invert: key -> Set of all labels (direct + inherited)
+  const byKey = new Map();
+  for (const tag of tagObjects) {
+    if (!tag || typeof tag !== 'object' || !tag.label) continue;
+
+    const allLabels = new Set([tag.label, ...getAncestorLabels(tag.id)]);
+
+    const list = Array.isArray(tag.taggings) ? tag.taggings : [];
+    for (const g of list) {
+      const key = g ? g[keyField] : null;
+      if (!key) continue;
+      let set = byKey.get(key);
+      if (!set) {
+        set = new Set();
+        byKey.set(key, set);
+      }
+      for (const label of allLabels) {
+        set.add(label);
+      }
+    }
+  }
+
+  const out = new Map();
+  for (const [key, set] of byKey) {
+    out.set(key, [...set].sort());
+  }
+  console.log(`   ${name} (inherited): ${out.size} unique ${keyField}s`);
+  return out;
+}
+
+/**
  * Fan the inverted tag maps out to per-printing entries keyed by scryfall_id
  * (the key the app's light/price indexes already use — no app-side model
  * changes needed). Every printing of the same oracle shares its oracle tags;
- * every printing of the same artwork shares its art tags.
+ * every printing of the same artwork shares its art tags. Returns a combined
+ * light-tags shape keyed by scryfall_id with art_tags, inherited_art_tags, and
+ * oracle_tags arrays.
  */
-function fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId) {
-  const oracleTags = {};
-  const artTags = {};
-  let oracleCards = 0;
-  let artCards = 0;
+function fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId) {
+  const lightTags = {};
+  let cardsWithTags = 0;
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
+    const entry = {};
     const oracleLabels = card.oracle_id ? oracleByOracleId.get(card.oracle_id) : null;
     if (oracleLabels && oracleLabels.length > 0) {
-      oracleTags[scryfallId] = oracleLabels;
-      oracleCards++;
+      entry.oracle_tags = oracleLabels;
     }
     const artLabels = card.illustration_id ? artByIllustrationId.get(card.illustration_id) : null;
     if (artLabels && artLabels.length > 0) {
-      artTags[scryfallId] = artLabels;
-      artCards++;
+      entry.art_tags = artLabels;
+    }
+    const artInheritedLabels = card.illustration_id ? artInheritedByIllustrationId.get(card.illustration_id) : null;
+    if (artInheritedLabels && artInheritedLabels.length > 0) {
+      entry.inherited_art_tags = artInheritedLabels;
+    }
+    if (Object.keys(entry).length > 0) {
+      lightTags[scryfallId] = entry;
+      cardsWithTags++;
     }
   }
-  return { oracleTags, artTags, oracleCards, artCards };
+  return { lightTags, cardsWithTags };
 }
 
 /**
@@ -1535,12 +1617,15 @@ async function sync() {
     // illustration_id (art tags). Here they are inverted to key -> labels and
     // fanned out to per-printing entries keyed by scryfall_id. Each file is
     // built independently so one failing only costs that file.
-    let tagOutput = null;
-    let oracleTagUpdatedAt = null;
-    let artTagUpdatedAt = null;
+    // Inherited (parent-hierarchy) tags are resolved from the same raw downloads
+    // and merged into the combined light_tags.json.gz output.
+    let tagsOutput = null;
+    let tagUpdatedAt = null;
     if (TAGS_ENABLED) {
       let oracleByOracleId = null;
       let artByIllustrationId = null;
+      let oracleByOracleIdInherited = null;
+      let artByIllustrationIdInherited = null;
 
       if (!bulkUrls) {
         console.error('⚠️ Tag build skipped — Scryfall bulk-data metadata unavailable');
@@ -1553,8 +1638,10 @@ async function sync() {
           } else {
             console.log('✅ Oracle Tags source exists');
           }
-          oracleByOracleId = invertTagObjects(parseTagBulkFile(oracleTagsRawGzPath, 'oracle'), 'oracle_id', 'oracle tags');
-          oracleTagUpdatedAt = bulkUrls.oracleTags.updatedAt;
+          const oracleTagObjects = parseTagBulkFile(oracleTagsRawGzPath, 'oracle');
+          oracleByOracleId = invertTagObjects(oracleTagObjects, 'oracle_id', 'oracle tags');
+          oracleByOracleIdInherited = resolveInheritedTags(oracleTagObjects, 'oracle_id', 'oracle tags');
+          tagUpdatedAt = bulkUrls.oracleTags.updatedAt;
           sources.oracleTags.ok = true;
         } catch (err) {
           console.error(`⚠️ Oracle tags build failed (${err.message}) — continuing without them`);
@@ -1572,8 +1659,10 @@ async function sync() {
           } else {
             console.log('✅ Art Tags source exists');
           }
-          artByIllustrationId = invertTagObjects(parseTagBulkFile(artTagsRawGzPath, 'art'), 'illustration_id', 'art tags');
-          artTagUpdatedAt = bulkUrls.artTags.updatedAt;
+          const artTagObjects = parseTagBulkFile(artTagsRawGzPath, 'art');
+          artByIllustrationId = invertTagObjects(artTagObjects, 'illustration_id', 'art tags');
+          artByIllustrationIdInherited = resolveInheritedTags(artTagObjects, 'illustration_id', 'art tags');
+          tagUpdatedAt = bulkUrls.artTags.updatedAt;
           sources.artTags.ok = true;
         } catch (err) {
           console.error(`⚠️ Art tags build failed (${err.message}) — continuing without them`);
@@ -1589,10 +1678,16 @@ async function sync() {
           console.error('⚠️ Scryfall card data unavailable — tags cannot be joined to scryfall_ids');
           warnings.push('Tagger tags skipped: Scryfall card data unavailable for the join');
         } else {
-          tagOutput = fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId);
-          sources.oracleTags.cards = tagOutput.oracleCards;
-          sources.artTags.cards = tagOutput.artCards;
-          console.log(`🏷️  Tags joined: ${tagOutput.oracleCards} printings with oracle tags, ${tagOutput.artCards} with art tags`);
+          tagsOutput = fanOutTagsToScryfallIds(
+            scryfallCards,
+            oracleByOracleId,
+            artByIllustrationId,
+            oracleByOracleIdInherited,
+            artByIllustrationIdInherited
+          );
+          sources.oracleTags.cards = Object.keys(tagsOutput.lightTags).filter(id => tagsOutput.lightTags[id].oracle_tags).length;
+          sources.artTags.cards = Object.keys(tagsOutput.lightTags).filter(id => tagsOutput.lightTags[id].art_tags).length;
+          console.log(`🏷️  Tags joined: ${tagsOutput.cardsWithTags} printings with tags`);
         }
       }
     } else {
@@ -1788,23 +1883,14 @@ async function sync() {
     const lightPriceIndexTempPath = path.join(OUTPUT_DIR, 'light_price_index_temp.json');
     await writeAndCompressJson(extractedPrices, lightPriceIndexTempPath, lightPriceIndexGzPath, 'light_price_index.json.gz');
 
-    // Tag indexes: scryfall_id -> sorted unique label arrays. Bare maps — the
+    // Tag indexes: scryfall_id -> combined tag object. Bare map — the
     // smallest possible shape; freshness metadata lives in manifest.json.
-    let oracleTagsWritten = 0;
-    let artTagsWritten = 0;
-    if (tagOutput) {
-      if (tagOutput.oracleTags && Object.keys(tagOutput.oracleTags).length > 0) {
-        const oracleTagsGzPath = path.join(OUTPUT_DIR, 'oracle_tags.json.gz');
-        const oracleTagsTempPath = path.join(OUTPUT_DIR, 'oracle_tags_temp.json');
-        await writeAndCompressJson(tagOutput.oracleTags, oracleTagsTempPath, oracleTagsGzPath, 'oracle_tags.json.gz');
-        oracleTagsWritten = Object.keys(tagOutput.oracleTags).length;
-      }
-      if (tagOutput.artTags && Object.keys(tagOutput.artTags).length > 0) {
-        const artTagsGzPath = path.join(OUTPUT_DIR, 'art_tags.json.gz');
-        const artTagsTempPath = path.join(OUTPUT_DIR, 'art_tags_temp.json');
-        await writeAndCompressJson(tagOutput.artTags, artTagsTempPath, artTagsGzPath, 'art_tags.json.gz');
-        artTagsWritten = Object.keys(tagOutput.artTags).length;
-      }
+    let tagsCardsWritten = 0;
+    if (tagsOutput) {
+      const lightTagsGzPath = path.join(OUTPUT_DIR, 'light_tags.json.gz');
+      const lightTagsTempPath = path.join(OUTPUT_DIR, 'light_tags_temp.json');
+      await writeAndCompressJson(tagsOutput.lightTags, lightTagsTempPath, lightTagsGzPath, 'light_tags.json.gz');
+      tagsCardsWritten = Object.keys(tagsOutput.lightTags).length;
     }
 
     const timestamp = new Date().toISOString();
@@ -1889,8 +1975,8 @@ async function sync() {
         updatedAt: ckUpdatedAt,
       },
       tags: {
-        oracle: { cards: oracleTagsWritten, updatedAt: oracleTagUpdatedAt },
-        art: { cards: artTagsWritten, updatedAt: artTagUpdatedAt },
+        oracle: { cards: sources.oracleTags.cards, updatedAt: tagUpdatedAt },
+        art: { cards: sources.artTags.cards, updatedAt: tagUpdatedAt },
       },
       ...(warnings.length > 0 ? { warnings } : {}),
     };
@@ -1939,8 +2025,9 @@ async function sync() {
     console.log(`   - Cards in light_price_index: ${Object.keys(extractedPrices).length}`);
     console.log(`   - Total price entries available: ${pricesTotal}`);
     console.log(`   - ManaPool purchase URLs: ${manapoolLinked} cards linked (${Object.keys(manapoolByScryfallId).length} in stock from API)`);
-    console.log(`   - Oracle tags: ${oracleTagsWritten} printings tagged`);
-    console.log(`   - Art tags: ${artTagsWritten} printings tagged`);
+    console.log(`   - Light tags: ${tagsCardsWritten} printings tagged`);
+    console.log(`   - Oracle tags: ${sources.oracleTags.cards} printings tagged`);
+    console.log(`   - Art tags: ${sources.artTags.cards} printings tagged`);
     console.log(`   - Card Kingdom: ${ckUniqueIds} scryfall IDs, ${ckPricedCards} priced, ${ckLinked} purchase URLs linked (${ckFoilLinked} foil), ${ckSkipped} non-card entries skipped`);
   } catch (error) {
     console.error('❌ Error during sync:');

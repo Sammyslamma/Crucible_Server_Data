@@ -6270,7 +6270,8 @@ zurzoth (1) · zyym (1) · zzzyxas (1)
 
 ## Notes
 
-- Tags join cards by `oracle_id` (oracle) / `illustration_id` (art); the pipeline fans them out to `scryfall_id` keys in `oracle_tags.json.gz` / `art_tags.json.gz`.
+- Tags join cards by `oracle_id` (oracle) / `illustration_id` (art); the pipeline fans them out to `scryfall_id` keys in `light_tags.json.gz`. Each entry carries `art_tags`, `inherited_art_tags`, and `oracle_tags` arrays.
+- Inherited tags are resolved from each tag's `parent_ids` hierarchy — a card tagged with a child label also receives all ancestor labels up the chain.
 - ~96.5% of printings have at least one oracle tag; ~95.7% at least one art tag.
 - Weights exist in the schema but are 99.75% `median` - do not design around them.
 - Slugs/labels can change over time; tag UUIDs are the only stable identifiers (relevant only if a per-tag suppression list is ever needed).

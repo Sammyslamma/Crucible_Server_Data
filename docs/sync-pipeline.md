@@ -11,7 +11,7 @@ The sync runs daily (scheduled GitHub Actions workflow). It:
 1. Downloads card data from **Scryfall** and **MTGJSON**.
 2. Merges them into a *light card index* (`light_index.json.gz`) with exact purchase links.
 3. Pulls prices for every configured store, walking a **per-store source chain** with automatic fallbacks and a **last-known-good carry-over** guard.
-4. Builds the **Tagger community tag files** (`oracle_tags.json.gz` / `art_tags.json.gz`) from Scryfall's bulk data, joined to printings by Scryfall ID.
+4. Builds the **light_tags.json.gz** tag file from Scryfall's Tagger bulk data (oracle_tags + art_tags), joined to printings by Scryfall ID. Each entry carries `art_tags`, `inherited_art_tags`, and `oracle_tags` arrays.
 5. Writes `light_price_index.json.gz`, `manifest.json`, and pushes them to the `data` branch.
 
 The app then downloads those files. The pipeline is a *daily snapshot* — it keeps the latest prices per store, not historical series.
@@ -22,8 +22,7 @@ The app then downloads those files. The pipeline is a *daily snapshot* — it ke
 |---|---|
 | `light_index.json.gz` | Per-card light data: faces, images, type, legalities, `purchaseUris` (exact links only) |
 | `light_price_index.json.gz` | Per-card prices keyed by Scryfall ID: `{ retail: { normal/foil/etched: { date: price } }, currency }` per store |
-| `oracle_tags.json.gz` | Tagger **gameplay tags** keyed by Scryfall ID: `{ "<scryfall_id>": ["label", ...] }` (labels only, sorted) |
-| `art_tags.json.gz` | Tagger **artwork tags** keyed by Scryfall ID, same shape |
+| `light_tags.json.gz` | Tagger tags keyed by Scryfall ID: `{ "<scryfall_id>": { art_tags: ["label", ...], inherited_art_tags: ["label", ...], oracle_tags: ["label", ...] } }` (labels only, sorted, may be empty per card) |
 | `manifest.json` | Sync metadata, source health, per-vendor pricing attribution, warnings (consumed by the watchdog) |
 
 ---
@@ -179,9 +178,10 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 
 ### Tagger tags
 - **`parseTagBulkFile(gzPath, name)`** — parses a Tagger tag bulk file (a gzipped JSON array of tag objects; JSONL accepted defensively).
-- **`invertTagObjects(tagObjects, keyField, name)`** — inverts `tag → taggings` into `oracle_id` / `illustration_id` → sorted unique labels. Label-only output by design: slug/uri/description/hierarchy are dropped to keep the files small (the full vocabulary with counts and parents lives in `docs/tag-vocabulary.md`; role buckets are curated app-side).
-- **`fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId)`** — joins the inverted maps against the Scryfall card data and produces per-printing entries keyed by `scryfall_id` (every printing of an oracle shares its oracle tags; every printing of an artwork shares its art tags).
-- Wiring lives inline in `sync()`: each tag file is downloaded/parsed/inverted independently (one failing only costs that file), then fanned out and written as `oracle_tags.json.gz` / `art_tags.json.gz`. Upstream, tags never reference `scryfall_id` — the join is the point of this step.
+- **`invertTagObjects(tagObjects, keyField, name)`** — inverts `tag → taggings` into `oracle_id` / `illustration_id` -> sorted unique label arrays. Label-only output by design: slug/uri/description/hierarchy are dropped to keep the files small.
+- **`resolveInheritedTags(tagObjects, keyField, name)`** — resolves parent-hierarchy tags from each tag's `parent_ids` field, producing key -> direct + ancestor label arrays.
+- **`fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId)`** — joins the inverted maps against the Scryfall card data and produces per-printing entries keyed by `scryfall_id`, each carrying `art_tags`, `inherited_art_tags`, and `oracle_tags` arrays.
+- Wiring lives inline in `sync()`: each tag file is downloaded/parsed/inverted independently (one failing only costs that file), then fanned out and written as `light_tags.json.gz`. Upstream, tags never reference `scryfall_id` — the join is the point of this step.
 
 ---
 
