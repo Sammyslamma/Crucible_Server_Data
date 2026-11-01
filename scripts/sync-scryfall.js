@@ -1916,7 +1916,10 @@ async function sync() {
 
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
-    const tagsVersion = `${TAGS_OUTPUT_VERSION}-${createHash('sha256').update(JSON.stringify(tagInputHashes)).digest('hex')}`;
+    const tagsVersion = `${TAGS_OUTPUT_VERSION}-${createHash('sha256').update(JSON.stringify({
+      inputs: tagInputHashes,
+      output: tagsOutput ? tagsOutput.lightTags : null,
+    })).digest('hex')}`;
 
     const manapoolLinked = Object.values(lightIndex).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
     let ckLinked = 0;
@@ -1978,6 +1981,7 @@ async function sync() {
       version,
       tagsVersion,
       generatedAt: timestamp,
+      tagsCards: tagsCardsWritten,
       lightIndexCards,
       pricesCards,
       pricesTotal,

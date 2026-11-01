@@ -23,7 +23,7 @@ The app then downloads those files. The pipeline is a *daily snapshot* — it ke
 | `light_index.json.gz` | Per-card light data: faces, images, type, legalities, `purchaseUris` (exact links only) |
 | `light_price_index.json.gz` | Per-card prices keyed by Scryfall ID: `{ retail: { normal/foil/etched: { date: price } }, currency }` per store |
 | `light_tags.json.gz` | Tagger tags keyed by Scryfall ID: `{ "<scryfall_id>": { art_tags: ["label", ...], inherited_art_tags: ["label", ...], oracle_tags: ["label", ...], inherited_oracle_tags: ["label", ...] } }` (labels only; Oracle direct and inherited tags are separate) |
-| `manifest.json` | Sync metadata, source health, per-vendor pricing attribution, warnings (consumed by the watchdog) |
+| `manifest.json` | Sync metadata including `tagsCards` and `tagsVersion`, source health, per-vendor pricing attribution, warnings (consumed by the watchdog and app sync) |
 
 ---
 
@@ -96,6 +96,7 @@ Each store independently resolves its prices and its links. **The first source i
   "version": "2026-09-02",
   "tagsVersion": "2-<sha256>",
   "generatedAt": "2026-09-02T...Z",
+  "tagsCards": 112820,
   "lightIndexCards": 117620,
   "pricesCards": 101257,
   "pricesTotal": 108590,
@@ -125,6 +126,8 @@ Each store independently resolves its prices and its links. **The first source i
 }
 ```
 
+- **`tagsCards`** — number of Scryfall printings written to `light_tags.json.gz`.
+- **`tagsVersion`** — output-semantics version plus a SHA-256 hash of parsed tag inputs and the final joined tag map. It changes when tag inputs or the generated printing data changes; bump `TAGS_OUTPUT_VERSION` when output semantics change.
 - **`sources.*.ok`** — a `false` means a download/fetch failed.
 - **`pricing.vendors.*.primary`** — the intended primary chain level (`mtgjson` | `cardkingdom-api` | `manapool-api`).
 - **`pricing.vendors.*` counts** — how many cards each layer filled (`scryfall`, `carriedOver`) and the final `priced` total.
@@ -198,6 +201,6 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 | `CARDKINGDOM_ENABLED`, `CARDKINGDOM_SINGLES_URL` | Card Kingdom on/off + API endpoint |
 | `CK_LIVEPRICES_PREFER_API` | Prefer live CK prices over MTGJSON's cardkingdom feed |
 | `TAGS_ENABLED` | Master switch for the Tagger tag build (`0` = skip the oracle/art tag files entirely) |
-| `TAGS_OUTPUT_VERSION` | Bump when tag output semantics change; `tagsVersion` also incorporates hashes of the parsed Oracle and artwork tag inputs |
+| `TAGS_OUTPUT_VERSION` | Bump when tag output semantics change; `tagsVersion` also hashes parsed Oracle/artwork inputs and the final joined tag map |
 | `STORE_HOME_URLS` | Per-store homepage fallbacks written into `manifest.json` |
 | `CLEANUP_*` | Per-file temp cleanup flags (1 = delete, 0 = keep) |
