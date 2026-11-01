@@ -11,7 +11,7 @@ The sync runs daily (scheduled GitHub Actions workflow). It:
 1. Downloads card data from **Scryfall** and **MTGJSON**.
 2. Merges them into a *light card index* (`light_index.json.gz`) with exact purchase links.
 3. Pulls prices for every configured store, walking a **per-store source chain** with automatic fallbacks and a **last-known-good carry-over** guard.
-4. Builds the **light_tags.json.gz** tag file from Scryfall's Tagger bulk data (oracle_tags + art_tags), joined to printings by Scryfall ID. Each entry carries `art_tags`, `inherited_art_tags`, and `oracle_tags` arrays.
+4. Builds the **light_tags.json.gz** tag file from Scryfall's Tagger bulk data (oracle_tags + art_tags), joined to printings by Scryfall ID. Oracle `oracle_tags` remain direct tags; `inherited_oracle_tags` contains sorted, deduplicated ancestor labels only. Artwork tags are also included.
 5. Writes `light_price_index.json.gz`, `manifest.json`, and pushes them to the `data` branch.
 
 The app then downloads those files. The pipeline is a *daily snapshot* — it keeps the latest prices per store, not historical series.
@@ -22,7 +22,7 @@ The app then downloads those files. The pipeline is a *daily snapshot* — it ke
 |---|---|
 | `light_index.json.gz` | Per-card light data: faces, images, type, legalities, `purchaseUris` (exact links only) |
 | `light_price_index.json.gz` | Per-card prices keyed by Scryfall ID: `{ retail: { normal/foil/etched: { date: price } }, currency }` per store |
-| `light_tags.json.gz` | Tagger tags keyed by Scryfall ID: `{ "<scryfall_id>": { art_tags: ["label", ...], inherited_art_tags: ["label", ...], oracle_tags: ["label", ...] } }` (labels only, sorted, may be empty per card) |
+| `light_tags.json.gz` | Tagger tags keyed by Scryfall ID: `{ "<scryfall_id>": { art_tags: ["label", ...], inherited_art_tags: ["label", ...], oracle_tags: ["label", ...], inherited_oracle_tags: ["label", ...] } }` (labels only; Oracle direct and inherited tags are separate) |
 | `manifest.json` | Sync metadata, source health, per-vendor pricing attribution, warnings (consumed by the watchdog) |
 
 ---
@@ -94,6 +94,7 @@ Each store independently resolves its prices and its links. **The first source i
 ```jsonc
 {
   "version": "2026-09-02",
+  "tagsVersion": "2-<sha256>",
   "generatedAt": "2026-09-02T...Z",
   "lightIndexCards": 117620,
   "pricesCards": 101257,
@@ -179,8 +180,8 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 ### Tagger tags
 - **`parseTagBulkFile(gzPath, name)`** — parses a Tagger tag bulk file (a gzipped JSON array of tag objects; JSONL accepted defensively).
 - **`invertTagObjects(tagObjects, keyField, name)`** — inverts `tag → taggings` into `oracle_id` / `illustration_id` -> sorted unique label arrays. Label-only output by design: slug/uri/description/hierarchy are dropped to keep the files small.
-- **`resolveInheritedTags(tagObjects, keyField, name)`** — resolves parent-hierarchy tags from each tag's `parent_ids` field, producing key -> direct + ancestor label arrays.
-- **`fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId)`** — joins the inverted maps against the Scryfall card data and produces per-printing entries keyed by `scryfall_id`, each carrying `art_tags`, `inherited_art_tags`, and `oracle_tags` arrays.
+- **`resolveInheritedTags(tagObjects, keyField, name)`** — resolves parent-hierarchy tags from each tag's `parent_ids` field, producing sorted ancestor labels (artwork retains its existing combined inherited map).
+- **`fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId)`** — joins tags to printings by `oracle_id` / `illustration_id` and writes per-printing entries keyed by `scryfall_id`, keeping `oracle_tags` direct and `inherited_oracle_tags` ancestor-only.
 - Wiring lives inline in `sync()`: each tag file is downloaded/parsed/inverted independently (one failing only costs that file), then fanned out and written as `light_tags.json.gz`. Upstream, tags never reference `scryfall_id` — the join is the point of this step.
 
 ---
@@ -197,5 +198,6 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 | `CARDKINGDOM_ENABLED`, `CARDKINGDOM_SINGLES_URL` | Card Kingdom on/off + API endpoint |
 | `CK_LIVEPRICES_PREFER_API` | Prefer live CK prices over MTGJSON's cardkingdom feed |
 | `TAGS_ENABLED` | Master switch for the Tagger tag build (`0` = skip the oracle/art tag files entirely) |
+| `TAGS_OUTPUT_VERSION` | Bump when tag output semantics change; `tagsVersion` also incorporates hashes of the parsed Oracle and artwork tag inputs |
 | `STORE_HOME_URLS` | Per-store homepage fallbacks written into `manifest.json` |
 | `CLEANUP_*` | Per-file temp cleanup flags (1 = delete, 0 = keep) |

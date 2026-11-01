@@ -4,6 +4,7 @@ import path from 'path';
 import { createReadStream, createWriteStream } from 'fs';
 import zlib from 'zlib';
 import JSONStream from 'JSONStream';
+import { createHash } from 'crypto';
 
 // MTGJSON serves pre-compressed .json.gz variants of every file. Downloading
 // those instead of the raw JSON cuts the transfer size dramatically
@@ -83,9 +84,10 @@ const CLEANUP_CARDKINGDOM_TEMP = 1;  // cardkingdom_temp.json
 // illustration_id) and fanned out into scryfall_id-keyed label arrays.
 // Inherited (parent-hierarchy) tags are resolved from each tag's parent_ids
 // and included alongside direct tags. Combined into a single output file:
-//   light_tags.json.gz — { "<scryfall_id>": { art_tags: [...], inherited_art_tags: [...], oracle_tags: [...] } }
+//   light_tags.json.gz — { "<scryfall_id>": { art_tags: [...], inherited_art_tags: [...], oracle_tags: [...], inherited_oracle_tags: [...] } }
 // A failure here only costs the tag files; cards/prices/links are unaffected.
 const TAGS_ENABLED = 1;              // Set 0 to skip the tag build entirely
+const TAGS_OUTPUT_VERSION = 2;       // Bump when tag output semantics change
 const CLEANUP_ORACLE_TAGS_GZ = 1;    // oracle_tags_raw.json.gz (upstream download)
 const CLEANUP_ART_TAGS_GZ = 1;       // art_tags_raw.json.gz (upstream download)
 
@@ -1263,9 +1265,9 @@ function invertTagObjects(tagObjects, keyField, name) {
  * hierarchy (e.g. a card tagged "stormy sky" also inherits "sky" and "weather").
  *
  * Returns a Map: key (oracle_id / illustration_id) -> sorted unique label array
- * containing direct labels + all inherited ancestor labels.
+ * containing ancestor labels, plus direct labels when includeDirectLabels is true.
  */
-function resolveInheritedTags(tagObjects, keyField, name) {
+function resolveInheritedTags(tagObjects, keyField, name, includeDirectLabels = false) {
   // Build tag id -> tag object lookup for O(1) parent resolution
   const tagIdToTag = new Map();
   for (const tag of tagObjects) {
@@ -1277,7 +1279,8 @@ function resolveInheritedTags(tagObjects, keyField, name) {
   function getAncestorLabels(tagId, visited = new Set()) {
     if (ancestorCache.has(tagId)) return ancestorCache.get(tagId);
     if (visited.has(tagId)) return new Set(); // cycle guard
-    visited.add(tagId);
+    const nextVisited = new Set(visited);
+    nextVisited.add(tagId);
 
     const tag = tagIdToTag.get(tagId);
     if (!tag) return new Set();
@@ -1287,7 +1290,7 @@ function resolveInheritedTags(tagObjects, keyField, name) {
       const parentTag = tagIdToTag.get(parentId);
       if (parentTag && parentTag.label) {
         ancestors.add(parentTag.label);
-        for (const al of getAncestorLabels(parentId, visited)) {
+        for (const al of getAncestorLabels(parentId, nextVisited)) {
           ancestors.add(al);
         }
       }
@@ -1297,12 +1300,13 @@ function resolveInheritedTags(tagObjects, keyField, name) {
     return ancestors;
   }
 
-  // Invert: key -> Set of all labels (direct + inherited)
+  // Invert: key -> Set of ancestor labels, optionally including direct labels.
   const byKey = new Map();
   for (const tag of tagObjects) {
     if (!tag || typeof tag !== 'object' || !tag.label) continue;
 
-    const allLabels = new Set([tag.label, ...getAncestorLabels(tag.id)]);
+    const allLabels = getAncestorLabels(tag.id);
+    if (includeDirectLabels) allLabels.add(tag.label);
 
     const list = Array.isArray(tag.taggings) ? tag.taggings : [];
     for (const g of list) {
@@ -1332,23 +1336,37 @@ function resolveInheritedTags(tagObjects, keyField, name) {
  * (the key the app's light/price indexes already use — no app-side model
  * changes needed). Every printing of the same oracle shares its oracle tags;
  * every printing of the same artwork shares its art tags. Returns a combined
- * light-tags shape keyed by scryfall_id with art_tags, inherited_art_tags, and
- * oracle_tags arrays.
+ * light-tags shape keyed by scryfall_id with art_tags, inherited_art_tags,
+ * oracle_tags, and inherited_oracle_tags arrays.
  */
 function fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId) {
   const lightTags = {};
   let cardsWithTags = 0;
   for (const [scryfallId, card] of Object.entries(scryfallCards)) {
     const entry = {};
-    const oracleLabels = card.oracle_id ? oracleByOracleId.get(card.oracle_id) : null;
+    const oracleLabels = card.oracle_id && oracleByOracleId ? oracleByOracleId.get(card.oracle_id) : null;
     if (oracleLabels && oracleLabels.length > 0) {
       entry.oracle_tags = oracleLabels;
     }
-    const artLabels = card.illustration_id ? artByIllustrationId.get(card.illustration_id) : null;
+    const inheritedOracleLabels = card.oracle_id && oracleInheritedByOracleId
+      ? oracleInheritedByOracleId.get(card.oracle_id)
+      : null;
+    if (inheritedOracleLabels && inheritedOracleLabels.length > 0) {
+      const directOracleLabels = new Set(oracleLabels || []);
+      const ancestorOnlyLabels = inheritedOracleLabels.filter(label => !directOracleLabels.has(label));
+      if (ancestorOnlyLabels.length > 0) {
+        entry.inherited_oracle_tags = ancestorOnlyLabels;
+      }
+    }
+    const artLabels = card.illustration_id && artByIllustrationId
+      ? artByIllustrationId.get(card.illustration_id)
+      : null;
     if (artLabels && artLabels.length > 0) {
       entry.art_tags = artLabels;
     }
-    const artInheritedLabels = card.illustration_id ? artInheritedByIllustrationId.get(card.illustration_id) : null;
+    const artInheritedLabels = card.illustration_id && artInheritedByIllustrationId
+      ? artInheritedByIllustrationId.get(card.illustration_id)
+      : null;
     if (artInheritedLabels && artInheritedLabels.length > 0) {
       entry.inherited_art_tags = artInheritedLabels;
     }
@@ -1621,6 +1639,7 @@ async function sync() {
     // and merged into the combined light_tags.json.gz output.
     let tagsOutput = null;
     let tagUpdatedAt = null;
+    const tagInputHashes = { oracle: null, art: null };
     if (TAGS_ENABLED) {
       let oracleByOracleId = null;
       let artByIllustrationId = null;
@@ -1639,6 +1658,7 @@ async function sync() {
             console.log('✅ Oracle Tags source exists');
           }
           const oracleTagObjects = parseTagBulkFile(oracleTagsRawGzPath, 'oracle');
+          tagInputHashes.oracle = createHash('sha256').update(JSON.stringify(oracleTagObjects)).digest('hex');
           oracleByOracleId = invertTagObjects(oracleTagObjects, 'oracle_id', 'oracle tags');
           oracleByOracleIdInherited = resolveInheritedTags(oracleTagObjects, 'oracle_id', 'oracle tags');
           tagUpdatedAt = bulkUrls.oracleTags.updatedAt;
@@ -1660,8 +1680,9 @@ async function sync() {
             console.log('✅ Art Tags source exists');
           }
           const artTagObjects = parseTagBulkFile(artTagsRawGzPath, 'art');
+          tagInputHashes.art = createHash('sha256').update(JSON.stringify(artTagObjects)).digest('hex');
           artByIllustrationId = invertTagObjects(artTagObjects, 'illustration_id', 'art tags');
-          artByIllustrationIdInherited = resolveInheritedTags(artTagObjects, 'illustration_id', 'art tags');
+          artByIllustrationIdInherited = resolveInheritedTags(artTagObjects, 'illustration_id', 'art tags', true);
           tagUpdatedAt = bulkUrls.artTags.updatedAt;
           sources.artTags.ok = true;
         } catch (err) {
@@ -1895,6 +1916,7 @@ async function sync() {
 
     const timestamp = new Date().toISOString();
     const version = timestamp.split('T')[0];
+    const tagsVersion = `${TAGS_OUTPUT_VERSION}-${createHash('sha256').update(JSON.stringify(tagInputHashes)).digest('hex')}`;
 
     const manapoolLinked = Object.values(lightIndex).filter(c => c.purchaseUris && c.purchaseUris.manapool).length;
     let ckLinked = 0;
@@ -1954,6 +1976,7 @@ async function sync() {
 
     const manifest = {
       version,
+      tagsVersion,
       generatedAt: timestamp,
       lightIndexCards,
       pricesCards,
