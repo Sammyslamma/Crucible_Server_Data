@@ -94,7 +94,7 @@ Each store independently resolves its prices and its links. **The first source i
 ```jsonc
 {
   "version": "2026-09-02",
-  "tagsVersion": "2-<sha256>",
+  "tagsVersion": "3-<sha256>",
   "generatedAt": "2026-09-02T...Z",
   "tagsCards": 112820,
   "lightIndexCards": 117620,
@@ -184,7 +184,7 @@ When it runs: `watchdog.yml` fires via `workflow_run` the moment the sync comple
 - **`parseTagBulkFile(gzPath, name)`** — parses a Tagger tag bulk file (a gzipped JSON array of tag objects; JSONL accepted defensively).
 - **`invertTagObjects(tagObjects, keyField, name)`** — inverts `tag → taggings` into `oracle_id` / `illustration_id` -> sorted unique label arrays. Label-only output by design: slug/uri/description/hierarchy are dropped to keep the files small.
 - **`resolveInheritedTags(tagObjects, keyField, name)`** — resolves parent-hierarchy tags from each tag's `parent_ids` field, producing sorted ancestor labels (artwork retains its existing combined inherited map).
-- **`fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId)`** — joins tags to printings by `oracle_id` / `illustration_id` and writes per-printing entries keyed by `scryfall_id`, keeping `oracle_tags` direct and `inherited_oracle_tags` ancestor-only.
+- **`fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId)`** — joins tags to printings by top-level and face-level `oracle_id` / `illustration_id`, combining and sorting unique labels per printing; `inherited_oracle_tags` remains ancestor-only.
 - Wiring lives inline in `sync()`: each tag file is downloaded/parsed/inverted independently (one failing only costs that file), then fanned out and written as `light_tags.json.gz`. Upstream, tags never reference `scryfall_id` — the join is the point of this step.
 
 ---

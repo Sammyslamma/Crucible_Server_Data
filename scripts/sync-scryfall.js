@@ -5,6 +5,7 @@ import { createReadStream, createWriteStream } from 'fs';
 import zlib from 'zlib';
 import JSONStream from 'JSONStream';
 import { createHash } from 'crypto';
+import { fanOutTagsToScryfallIds } from './scryfall_tag_fanout.mjs';
 
 // MTGJSON serves pre-compressed .json.gz variants of every file. Downloading
 // those instead of the raw JSON cuts the transfer size dramatically
@@ -87,7 +88,7 @@ const CLEANUP_CARDKINGDOM_TEMP = 1;  // cardkingdom_temp.json
 //   light_tags.json.gz — { "<scryfall_id>": { art_tags: [...], inherited_art_tags: [...], oracle_tags: [...], inherited_oracle_tags: [...] } }
 // A failure here only costs the tag files; cards/prices/links are unaffected.
 const TAGS_ENABLED = 1;              // Set 0 to skip the tag build entirely
-const TAGS_OUTPUT_VERSION = 2;       // Bump when tag output semantics change
+const TAGS_OUTPUT_VERSION = 3;       // Bump when tag output semantics change
 const CLEANUP_ORACLE_TAGS_GZ = 1;    // oracle_tags_raw.json.gz (upstream download)
 const CLEANUP_ART_TAGS_GZ = 1;       // art_tags_raw.json.gz (upstream download)
 
@@ -1329,53 +1330,6 @@ function resolveInheritedTags(tagObjects, keyField, name, includeDirectLabels = 
   }
   console.log(`   ${name} (inherited): ${out.size} unique ${keyField}s`);
   return out;
-}
-
-/**
- * Fan the inverted tag maps out to per-printing entries keyed by scryfall_id
- * (the key the app's light/price indexes already use — no app-side model
- * changes needed). Every printing of the same oracle shares its oracle tags;
- * every printing of the same artwork shares its art tags. Returns a combined
- * light-tags shape keyed by scryfall_id with art_tags, inherited_art_tags,
- * oracle_tags, and inherited_oracle_tags arrays.
- */
-function fanOutTagsToScryfallIds(scryfallCards, oracleByOracleId, artByIllustrationId, oracleInheritedByOracleId, artInheritedByIllustrationId) {
-  const lightTags = {};
-  let cardsWithTags = 0;
-  for (const [scryfallId, card] of Object.entries(scryfallCards)) {
-    const entry = {};
-    const oracleLabels = card.oracle_id && oracleByOracleId ? oracleByOracleId.get(card.oracle_id) : null;
-    if (oracleLabels && oracleLabels.length > 0) {
-      entry.oracle_tags = oracleLabels;
-    }
-    const inheritedOracleLabels = card.oracle_id && oracleInheritedByOracleId
-      ? oracleInheritedByOracleId.get(card.oracle_id)
-      : null;
-    if (inheritedOracleLabels && inheritedOracleLabels.length > 0) {
-      const directOracleLabels = new Set(oracleLabels || []);
-      const ancestorOnlyLabels = inheritedOracleLabels.filter(label => !directOracleLabels.has(label));
-      if (ancestorOnlyLabels.length > 0) {
-        entry.inherited_oracle_tags = ancestorOnlyLabels;
-      }
-    }
-    const artLabels = card.illustration_id && artByIllustrationId
-      ? artByIllustrationId.get(card.illustration_id)
-      : null;
-    if (artLabels && artLabels.length > 0) {
-      entry.art_tags = artLabels;
-    }
-    const artInheritedLabels = card.illustration_id && artInheritedByIllustrationId
-      ? artInheritedByIllustrationId.get(card.illustration_id)
-      : null;
-    if (artInheritedLabels && artInheritedLabels.length > 0) {
-      entry.inherited_art_tags = artInheritedLabels;
-    }
-    if (Object.keys(entry).length > 0) {
-      lightTags[scryfallId] = entry;
-      cardsWithTags++;
-    }
-  }
-  return { lightTags, cardsWithTags };
 }
 
 /**

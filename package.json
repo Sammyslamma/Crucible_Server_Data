@@ -6,7 +6,8 @@
   "main": "scripts/sync-scryfall.js",
   "scripts": {
     "sync": "node scripts/sync-scryfall.js",
-    "watchdog": "node scripts/watchdog.mjs"
+    "watchdog": "node scripts/watchdog.mjs",
+    "test": "node --test tests/scryfall_tag_fanout.mjs tests/scryfall_tags_pipeline_test.mjs"
   },
   "dependencies": {
     "node-fetch": "^3.3.0",
