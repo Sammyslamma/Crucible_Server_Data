@@ -1,0 +1,113 @@
+{
+  "version": "2026-11-27",
+  "tagsVersion": "3-ecf59faf929b1ab21abd63c4665b7301e1f51c7d7da3f9597aea545ac1ca8e80",
+  "generatedAt": "2026-11-27T21:46:55.543Z",
+  "tagsCards": 119975,
+  "lightIndexCards": 120276,
+  "pricesCards": 107504,
+  "pricesTotal": 115210,
+  "sources": {
+    "scryfall": {
+      "ok": true,
+      "cards": 120276
+    },
+    "mtgjson": {
+      "ok": true,
+      "cards": 38969
+    },
+    "mtgjsonPrices": {
+      "ok": true,
+      "entries": 115210
+    },
+    "manapool": {
+      "ok": true,
+      "inStock": 104058,
+      "linked": 104058
+    },
+    "cardkingdom": {
+      "ok": true,
+      "products": 154391,
+      "uniqueIds": 100561,
+      "priced": 100542,
+      "linked": 100542
+    },
+    "oracleTags": {
+      "ok": true,
+      "cards": 115991
+    },
+    "artTags": {
+      "ok": true,
+      "cards": 119167
+    }
+  },
+  "pricing": {
+    "vendors": {
+      "tcgplayer": {
+        "primary": "mtgjson",
+        "mtgjson": 0,
+        "scryfall": 943,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 102251
+      },
+      "cardmarket": {
+        "primary": "mtgjson",
+        "mtgjson": 0,
+        "scryfall": 12,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 102454
+      },
+      "cardkingdom": {
+        "primary": "cardkingdom-api",
+        "mtgjson": 0,
+        "scryfall": 0,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 100542
+      },
+      "manapool": {
+        "primary": "manapool-api",
+        "mtgjson": 0,
+        "scryfall": 0,
+        "manapool": 0,
+        "cardkingdom": 0,
+        "carriedOver": 0,
+        "priced": 102941
+      }
+    },
+    "carriedOver": []
+  },
+  "storeHomeUrls": {
+    "tcgplayer": "https://www.tcgplayer.com",
+    "cardmarket": "https://www.cardmarket.com",
+    "cardkingdom": "https://www.cardkingdom.com",
+    "manapool": "https://manapool.com"
+  },
+  "manapool": {
+    "inStockFromApi": 104058,
+    "linkedInLightIndex": 104058
+  },
+  "cardkingdom": {
+    "productsParsed": 154391,
+    "uniqueScryfallIds": 100561,
+    "linkedInLightIndex": 100542,
+    "foilLinkedInLightIndex": 64720,
+    "pricedCards": 100542,
+    "sealedSkipped": 642,
+    "updatedAt": "2026-11-27 13:10:44"
+  },
+  "tags": {
+    "oracle": {
+      "cards": 115991,
+      "updatedAt": "2026-11-27T10:01:26.530+00:00"
+    },
+    "art": {
+      "cards": 119167,
+      "updatedAt": "2026-11-27T10:01:26.530+00:00"
+    }
+  }
+}
